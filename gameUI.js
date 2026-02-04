@@ -20,26 +20,34 @@
   };
   const getRarityClass = (r) => RARITY_CLASS[r] || 'from-amber-50 to-orange-100 border-gray-300';
 
-  // ── 自定义 Hook：处理长按（用于移动端查看详情） ──
+  // ── 自定义 Hook：处理长按（仅限移动端触摸触发） ──
   const useLongPress = (callback, ms = 500) => {
     const [startLongPress, setStartLongPress] = useState(false);
-    
-    useEffect(() => {
-      let timerId;
-      if (startLongPress) {
-        timerId = setTimeout(callback, ms);
-      } else {
-        clearTimeout(timerId);
-      }
-      return () => clearTimeout(timerId);
-    }, [startLongPress, callback, ms]);
+    const timerRef = useRef(null);
+
+    const start = useCallback((e) => {
+      // 如果是鼠标右键或者不是触摸事件（在移动端适配中，我们只希望触摸触发长按）
+      // 电脑端我们依然依赖 hover 悬浮窗
+      if (e.type === 'mousedown') return; 
+
+      setStartLongPress(true);
+      timerRef.current = setTimeout(() => {
+        callback();
+        setStartLongPress(false);
+      }, ms);
+    }, [callback, ms]);
+
+    const stop = useCallback(() => {
+      setStartLongPress(false);
+      if (timerRef.current) clearTimeout(timerRef.current);
+    }, []);
 
     return {
-      onMouseDown: () => setStartLongPress(true),
-      onMouseUp: () => setStartLongPress(false),
-      onMouseLeave: () => setStartLongPress(false),
-      onTouchStart: () => setStartLongPress(true),
-      onTouchEnd: () => setStartLongPress(false),
+      onMouseDown: stop, // 电脑端按下直接清除，防止干扰
+      onMouseUp: stop,
+      onMouseLeave: stop,
+      onTouchStart: start,
+      onTouchEnd: stop,
     };
   };
 
@@ -161,7 +169,7 @@
           )}
         </div>
 
-        {/* 移动端详情模态框 (点击背景关闭) */}
+         {/* 移动端详情模态框 (点击背景关闭) */}
         {showMobileModal && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black bg-opacity-80 p-4"
             onClick={(e) => { e.stopPropagation(); setShowMobileModal(false); }}>
@@ -496,3 +504,4 @@
     );
   };
 })();
+
