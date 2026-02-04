@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>四路线卡牌对战 — 面对面模式</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+    <!-- 共享工具库（纯JS，无JSX） -->
+    <script src="shared.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+    // ============================================================
+    // localGame — 面对面模式逻辑层
+    // UI 全部由 GameUI 组件负责，此处只写 state + 规则
+    // ============================================================
+    const { useState, useEffect, useCallback } = React;
+
+    const LocalGame = () => {
+      // ── 等待 GameUI 加载完成 ──
+      const [uiReady, setUiReady] = useState(false);
+
+      useEffect(() => {
+        window.GameUILoader.load().then(() => setUiReady(true));
+        // 恢复音效设置
+        window.SoundManager.restoreFromStorage();
+      }, []);
+
+      // ── 卡牌数据 ──
+      const [allCards, setAllCards] = useState([]);
+
+      useEffect(() => {
+        window.loadCards()
+          .then(cards => setAllCards(cards))
+          .catch(err => {
+            console.error('加载卡牌失败', err);
+            alert('无法加载 card_data.csv，请确保文件在同一目录下并通过本地服务器访问。');
+          });
+      }, []);
+
+      // ── 游戏核心状态 ──
+      const INIT_STATE = {
+        turn: 0,
+        phase: 'idle',   // idle | redDeploy | blueDeploy | redSupport | battle
+        red:  { health: 30, coins: 0, hand: [], battlefield: [null,null,null,null], miracleDrawn: [30] },
+        blue: { health: 30, coins: 0, hand: [], battlefield: [null,null,null,null], miracleDrawn: [30] },
+        deck: [],
+        miracleDeck: [],
+        discardPile: [],
+        initialCards: [],        // 当前选牌阶段待选的6张
+        initialCardsBlue: [],    // 蓝方待选的6张（红方选完后替换）
+        selectedCard: null,
+        log: []
+      };
+
+      const [gameState,       setGameState]      = useState(INIT_STATE);
+      const [gamePhase,       setGamePhase]      = useState('notStarted');
+      const [winner,          setWinner]         = useState(null);
+      const [battleAnimation, setBattleAnimation] = useState({ active: false, lane: -1 });
+      const [cardShowOverlay, setCardShowOverlay] = useState(null);  // 支援/奇迹展示
+
+      // ── 日志辅助 ──
+      const addLog = useCallback((msg) => {
+        setGameState(prev => ({ ...prev, log: [...prev.log, msg] }));
+      }, []);
+
+      // ── 支援/奇迹 展示辅助：显示卡牌 N 秒后自动消失 ──
+      const showCardOverlay = useCallback((card) => {
+        setCardShowOverlay(card);
+        const dur = card.type === 'miracle' ? 2000 : 2000;
+        window.SoundManager.playSound(card.type === 'miracle' ? 'miracle' : 'place');
+        setTimeout(() => setCardShowOverlay(null), dur);
+      }, []);
+
+      // ── 初始化 ──
+      const initGame = useCallback(() => {
+        if (!allCards.length) return;
+
+        const regular  = allCards.filter(c => c.type !== 'miracle');
+        const miracles = allCards.filter(c => c.type === 'miracle');
+
+        const deck         = window.shuffleArray(regular.map(window.createCard));
+        const miracleDeck  = window.shuffleArray(miracles.map(window.createCard));
+
+        // 红蓝各抽6张（互不重叠）
+        const redSix  = deck.slice(0, 6);
+        const blueSix = deck.slice(6, 12);
+        const rest    = deck.slice(12);
+
+        // 各抽1张奇迹
+        const mDeck   = [...miracleDeck];
+        const redM    = mDeck.pop();
+        const blueM   = mDeck.pop();
+
+        setGameState({
+          ...INIT_STATE,
+          red:  { ...INIT_STATE.red,  hand: redM  ? [redM]  : [] },
+          blue: { ...INIT_STATE.blue, hand: blueM ? [blueM] : [] },
+          deck: rest,
+          miracleDeck: mDeck,
+          initialCards: redSix,
+          initialCardsBlue: blueSix,
+          log: ['游戏初始化完成！', '红蓝双方各抽取1张奇迹牌', '点击"开始选牌"进入选牌阶段']
+        });
+        setGamePhase('notStarted');
+        setWinner(null);
+      }, [allCards]);
+
+      // 卡牌加载后自动初始化
+      useEffect(() => { if (allCards.length) initGame(); }, [allCards, initGame]);
+
+      // 复盘事件监听（点击"复盘"按钮时隐藏胜利遮层）
+      useEffect(() => {
+        const handler = () => setWinner(null);
+        window.addEventListener('gameui:review', handler);
+        return () => window.removeEventListener('gameui:review', handler);
+      }, []);
+
+      // ── 开始选牌 ──
+      const startPicking = () => {
+        setGamePhase('redPicking');
+        addLog('--- 红方选牌阶段 ---');
+      };
+
+      // ── 选牌逻辑 ──
+      const pickCard = (card) => {
+        if (gamePhase === 'redPicking') {
+          const newHand = [...gameState.red.hand, card];
+          const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
+
+          if (newHand.length === 3) {  // 已有1奇迹 + 刚选第2张 = 3 → 红方选牌完
+            setGameState(prev => ({
+              ...prev,
+              red: { ...prev.red, hand: newHand },
+              initialCards: prev.initialCardsBlue,   // 切换到蓝方的6张
+              deck: window.shuffleArray([...prev.deck, ...remaining])
+            }));
+            setGamePhase('bluePicking');
+            addLog('红方选牌完成 → 蓝方选牌阶段');
+          } else {
+            setGameState(prev => ({
+              ...prev,
+              red: { ...prev.red, hand: newHand },
+              initialCards: remaining
+            }));
+            addLog(`红方选择了 ${card.name}`);
+          }
+
+        } else if (gamePhase === 'bluePicking') {
+          const newHand = [...gameState.blue.hand, card];
+          const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
+
+          if (newHand.length === 3) {
+            setGameState(prev => ({
+              ...prev,
+              blue: { ...prev.blue, hand: newHand },
+              initialCards: [],
+              deck: window.shuffleArray([...prev.deck, ...remaining])
+            }));
+            setGamePhase('playing');
+            addLog('蓝方选牌完成 → 点击"下一回合"开始游戏');
+          } else {
+            setGameState(prev => ({
+              ...prev,
+              blue: { ...prev.blue, hand: newHand },
+              initialCards: remaining
+            }));
+            addLog(`蓝方选择了 ${card.name}`);
+          }
+        }
+      };
+
+      // ── 开始新回合 ──
+      const startTurn = () => {
+        const newTurn = gameState.turn + 1;
+        const coins   = Math.min(newTurn, 10);
+        const logs    = [`--- 第${newTurn}回合开始 ---`, `双方获得 ${coins} 金币`];
+
+        let deck      = [...gameState.deck];
+        let redHand   = [...gameState.red.hand];
+        let blueHand  = [...gameState.blue.hand];
+
+        if (newTurn >= 2) {
+          for (let i = 0; i < 2; i++) {
+            const r = deck.pop(); if (r) redHand.push(r);
+            const b = deck.pop(); if (b) blueHand.push(b);
+          }
+          logs.push('双方各抽2张牌');
+        } else {
+          logs.push('第一回合不抽牌');
+        }
+
+        setGameState(prev => ({
+          ...prev,
+          turn: newTurn,
+          phase: 'redDeploy',
+          deck,
+          red:  { ...prev.red,  coins, hand: redHand },
+          blue: { ...prev.blue, coins, hand: blueHand },
+          log: [...prev.log, ...logs]
+        }));
+      };
+
+      // ── 选择手牌 ──
+      const selectCard = (card, player) => {
+        if (gameState.phase === 'idle' || gameState.phase === 'battle') return;
+
+        const isRedPhase = gameState.phase === 'redDeploy' || gameState.phase === 'redSupport';
+        if ((isRedPhase && player !== 'red') || (!isRedPhase && player !== 'blue')) return;
+
+        // 反复点击同一张 → 取消选择
+        if (gameState.selectedCard?.instanceId === card.instanceId) {
+          setGameState(prev => ({ ...prev, selectedCard: null }));
+          return;
+        }
+        setGameState(prev => ({ ...prev, selectedCard: card }));
+      };
+
+      // ── 放置战场牌 ──
+      const playCard = (laneIndex) => {
+        const card = gameState.selectedCard;
+        if (!card || card.type !== 'battlefield') return;
+
+        const player      = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
+        const playerState = gameState[player];
+
+        if (playerState.coins < card.cost) { addLog('金币不足！'); return; }
+        if (playerState.battlefield[laneIndex] !== null) { addLog('该路线已有卡牌！'); return; }
+
+        window.SoundManager.playSound('place');
+
+        const bf = [...playerState.battlefield];
+        bf[laneIndex] = { ...card };
+
+        setGameState(prev => ({
+          ...prev,
+          [player]: {
+            ...playerState,
+            battlefield: bf,
+            hand:  playerState.hand.filter(c => c.instanceId !== card.instanceId),
+            coins: playerState.coins - card.cost
+          },
+          selectedCard: null,
+          log: [...prev.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了 ${card.name}`]
+        }));
+      };
+
+      // ── 使用支援/奇迹 对单位 ──
+      const useCardOnTarget = (targetPlayer, laneIndex) => {
+        const card = gameState.selectedCard;
+        if (!card || (card.type !== 'support' && card.type !== 'miracle')) return;
+
+        const player      = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
+        const playerState = gameState[player];
+        const target      = gameState[targetPlayer].battlefield[laneIndex];
+        if (!target) { addLog('目标位置没有单位！'); return; }
+
+        const cost = card.type === 'miracle' ? 0 : card.cost;
+        if (playerState.coins < cost) { addLog('金币不足！'); return; }
+
+        addLog(`${player === 'red' ? '红方' : '蓝方'}对 ${target.name} 使用了 ${card.name}`);
+        showCardOverlay(card);   // ← 展示支援/奇迹卡牌（内含音效）
+
+        setGameState(prev => ({
+          ...prev,
+          [player]: {
+            ...playerState,
+            hand:  playerState.hand.filter(c => c.instanceId !== card.instanceId),
+            coins: playerState.coins - cost
+          },
+          discardPile: [...prev.discardPile, card],
+          selectedCard: null
+        }));
+      };
+
+      // ── "确认使用"（支援/奇迹 对玩家本身） ──
+      const confirmUse = () => {
+        const card = gameState.selectedCard;
+        if (!card) return;
+
+        const player      = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
+        const playerState = gameState[player];
+        const cost        = card.type === 'miracle' ? 0 : card.cost;
+        if (playerState.coins < cost) { addLog('金币不足！'); return; }
+
+        addLog(`${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`);
+        showCardOverlay(card);   // ← 展示支援/奇迹卡牌（内含音效）
+
+        setGameState(prev => ({
+          ...prev,
+          [player]: {
+            ...playerState,
+            hand:  playerState.hand.filter(c => c.instanceId !== card.instanceId),
+            coins: playerState.coins - cost
+          },
+          discardPile: [...prev.discardPile, card],
+          selectedCard: null
+        }));
+      };
+
+      // ── 结束阶段 ──
+      const endPhase = () => {
+        const next = { redDeploy: 'blueDeploy', blueDeploy: 'redSupport', redSupport: 'battle' };
+        const target = next[gameState.phase];
+
+        if (target === 'battle') {
+          setGameState(prev => ({ ...prev, phase: 'battle', selectedCard: null, log: [...prev.log, '--- 战斗阶段 ---'] }));
+          setTimeout(resolveBattle, 500);
+        } else {
+          const names = { blueDeploy: '蓝方部署阶段', redSupport: '红方支援阶段' };
+          setGameState(prev => ({ ...prev, phase: target, selectedCard: null, log: [...prev.log, `--- ${names[target]} ---`] }));
+        }
+      };
+
+      // ── 战斗结算（逐路线动画） ──
+      const resolveBattle = async () => {
+        // 拷贝当前状态用于逐步修改
+        // 注意：React state 在 async 里会过期，这里用 ref 技巧
+        // 但为了简洁我们直接用函数式 setGameState 最后一次写入
+        let redBF    = gameState.red.battlefield.map(c => c ? {...c} : null);
+        let blueBF   = gameState.blue.battlefield.map(c => c ? {...c} : null);
+        let redHP    = gameState.red.health;
+        let blueHP   = gameState.blue.health;
+        let discard  = [...gameState.discardPile];
+        let logs     = [];
+
+        for (let i = 0; i < 4; i++) {
+          setBattleAnimation({ active: true, lane: i });
+          window.SoundManager.playSound('attack');
+          await new Promise(r => setTimeout(r, 1000));
+
+          const rc = redBF[i], bc = blueBF[i];
+
+          if (rc && bc) {
+            rc.hp -= bc.atk;
+            bc.hp -= rc.atk;
+            logs.push(`路线${i+1}: ${rc.name}(${rc.hp}HP) VS ${bc.name}(${bc.hp}HP)`);
+            if (rc.hp <= 0) { discard.push(rc); redBF[i]  = null; logs.push(`  红方 ${rc.name} 被击败`); }
+            if (bc.hp <= 0) { discard.push(bc); blueBF[i] = null; logs.push(`  蓝方 ${bc.name} 被击败`); }
+          } else if (rc) {
+            blueHP -= rc.atk;
+            logs.push(`路线${i+1}: ${rc.name} 攻击蓝方玩家，造成 ${rc.atk} 伤害`);
+          } else if (bc) {
+            redHP -= bc.atk;
+            logs.push(`路线${i+1}: ${bc.name} 攻击红方玩家，造成 ${bc.atk} 伤害`);
+          }
+        }
+
+        setBattleAnimation({ active: false, lane: -1 });
+
+        // 奇迹牌里程碑抽取
+        let newMDeck = [...gameState.miracleDeck];
+        let redHand  = [...gameState.red.hand];
+        let blueHand = [...gameState.blue.hand];
+        let redDrawn = [...gameState.red.miracleDrawn];
+        let blueDrawn= [...gameState.blue.miracleDrawn];
+
+        const milestones = [25, 20, 15, 10, 5];
+        const drawMiracle = (hp, drawn, hand) => {
+          const hit = milestones.some(m => hp <= m && !drawn.includes(m));
+          if (hit) {
+            const newDrawn = [...drawn, ...milestones.filter(m => hp <= m && !drawn.includes(m))];
+            const card = newMDeck.pop();
+            if (card) {
+              hand.push(card);
+              return { drawn: newDrawn, drewName: card.name };
+            }
+            return { drawn: newDrawn, drewName: null };
+          }
+          return { drawn, drewName: null };
+        };
+
+        if (redHP < gameState.red.health) {
+          const res = drawMiracle(redHP, redDrawn, redHand);
+          redDrawn = res.drawn;
+          if (res.drewName) logs.push(`红方血量降至 ${redHP}，抽取奇迹牌：${res.drewName}`);
+        }
+        if (blueHP < gameState.blue.health) {
+          const res = drawMiracle(blueHP, blueDrawn, blueHand);
+          blueDrawn = res.drawn;
+          if (res.drewName) logs.push(`蓝方血量降至 ${blueHP}，抽取奇迹牌：${res.drewName}`);
+        }
+
+        // 判胜
+        if (redHP <= 0 || blueHP <= 0) {
+          const w = redHP > blueHP ? '红方' : (blueHP > redHP ? '蓝方' : '平局');
+          logs.push(`🎉 ${w === '平局' ? '平局！双方血量相同' : w + '获胜！对手生命归零'}`);
+          window.SoundManager.playSound('victory');
+          setWinner(w);
+        } else {
+          logs.push('战斗结算完成');
+        }
+
+        setGameState(prev => ({
+          ...prev,
+          phase: 'idle',
+          red:  { ...prev.red,  battlefield: redBF,  health: redHP,  hand: redHand,  miracleDrawn: redDrawn },
+          blue: { ...prev.blue, battlefield: blueBF, health: blueHP, hand: blueHand, miracleDrawn: blueDrawn },
+          miracleDeck: newMDeck,
+          discardPile: discard,
+          log: [...prev.log, ...logs]
+        }));
+
+        // 牌库耗尽检查（延迟一帧确保 state 更新后再判）
+        setTimeout(() => {
+          setGameState(prev => {
+            if (prev.deck.length === 0 && prev.red.hand.length === 0 && prev.blue.hand.length === 0 && !winner) {
+              const w = prev.red.health > prev.blue.health ? '红方' : (prev.blue.health > prev.red.health ? '蓝方' : '平局');
+              setWinner(w);
+              window.SoundManager.playSound('victory');
+              return { ...prev, log: [...prev.log, '--- 牌库耗尽 ---', `红方:${prev.red.health} | 蓝方:${prev.blue.health}`, `${w === '平局' ? '平局' : w + '获胜'}`] };
+            }
+            return prev;
+          });
+        }, 100);
+      };
+
+      // ── 重置 ──
+      const reset = () => {
+        setWinner(null);
+        setGamePhase('notStarted');
+        setBattleAnimation({ active: false, lane: -1 });
+        initGame();
+      };
+
+      // ── 渲染 ──
+      if (!uiReady) return <div className="text-white text-center mt-40 text-xl">加载中…</div>;
+
+      return (
+        <GameUI
+          gameState={gameState}
+          gamePhase={gamePhase}
+          allCards={allCards}
+          winner={winner}
+          battleAnimation={battleAnimation}
+          cardShowOverlay={cardShowOverlay}
+          onStartPicking={startPicking}
+          onPickCard={pickCard}
+          onStartTurn={startTurn}
+          onSelectCard={selectCard}
+          onPlayCard={playCard}
+          onUseCardOnTarget={useCardOnTarget}
+          onConfirmUse={confirmUse}
+          onEndPhase={endPhase}
+          onReset={reset}
+          hideOpponentHand={false}
+          myRole={null}
+        />
+      );
+    };
+
+    ReactDOM.render(<LocalGame />, document.getElementById('root'));
+    </script>
+</body>
+</html>

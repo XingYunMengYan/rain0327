@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>卡牌图鉴 - 四路线卡牌对战</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // 音效管理器
+        const SoundManager = {
+          context: null,
+          bgm: null,
+          isMuted: false,
+          bgmEnabled: false,
+
+          init() {
+            if (!this.context) {
+              this.context = new (window.AudioContext || window.webkitAudioContext)();
+            }
+          },
+
+          playSound(type) {
+            if (this.isMuted) return;
+            this.init();
+
+            const ctx = this.context;
+            const oscillator = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+
+            oscillator.connect(gainNode);
+            gainNode.connect(ctx.destination);
+
+            switch(type) {
+              case 'click':
+                oscillator.frequency.value = 800;
+                gainNode.gain.setValueAtTime(0.1, ctx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+                oscillator.start(ctx.currentTime);
+                oscillator.stop(ctx.currentTime + 0.1);
+                break;
+              
+              case 'hover':
+                oscillator.frequency.value = 600;
+                gainNode.gain.setValueAtTime(0.08, ctx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+                oscillator.start(ctx.currentTime);
+                oscillator.stop(ctx.currentTime + 0.15);
+                break;
+            }
+          },
+
+          toggleBGM() {
+            this.bgmEnabled = !this.bgmEnabled;
+            if (this.bgmEnabled) {
+              this.playBGM();
+            } else {
+              this.stopBGM();
+            }
+            localStorage.setItem('bgmEnabled', this.bgmEnabled);
+          },
+
+          playBGM() {
+            if (this.isMuted || !this.bgmEnabled) return;
+            this.init();
+            if (this.bgm) this.stopBGM();
+
+            const ctx = this.context;
+            const gainNode = ctx.createGain();
+            gainNode.gain.value = 0.05;
+            gainNode.connect(ctx.destination);
+
+            const notes = [261.63, 329.63, 392.00, 523.25];
+            let currentStep = 0;
+
+            const playStep = () => {
+              if (!this.bgmEnabled) return;
+              const osc = ctx.createOscillator();
+              const noteGain = ctx.createGain();
+              
+              osc.type = 'triangle';
+              osc.frequency.setValueAtTime(notes[currentStep % notes.length], ctx.currentTime);
+              
+              noteGain.gain.setValueAtTime(0.03, ctx.currentTime);
+              noteGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+              
+              osc.connect(noteGain);
+              noteGain.connect(gainNode);
+              
+              osc.start();
+              osc.stop(ctx.currentTime + 0.5);
+              
+              currentStep++;
+              this.bgmTimeout = setTimeout(playStep, 500);
+            };
+
+            playStep();
+          },
+
+          stopBGM() {
+            if (this.bgmTimeout) {
+              clearTimeout(this.bgmTimeout);
+              this.bgmTimeout = null;
+            }
+          },
+
+          toggleMute() {
+            this.isMuted = !this.isMuted;
+            if (this.isMuted) {
+              this.stopBGM();
+            } else if (this.bgmEnabled) {
+              this.playBGM();
+            }
+          }
+        };
+
+        // 从localStorage恢复BGM设置
+        const savedBgmState = localStorage.getItem('bgmEnabled');
+        if (savedBgmState === 'true') {
+            SoundManager.bgmEnabled = true;
+            document.addEventListener('click', () => {
+                if (SoundManager.bgmEnabled && !SoundManager.bgmTimeout) {
+                    SoundManager.playBGM();
+                }
+            }, { once: true });
+        }
+
+        // SVG图标
+        const Sword = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <path d="M14.5 17.5L3 6V3h3l11.5 11.5" />
+                <path d="M13 19l6-6" />
+                <path d="M16 16l4 4" />
+                <path d="M19 21l2-2" />
+            </svg>
+        );
+
+        const Heart = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" />
+            </svg>
+        );
+
+        const Coins = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <circle cx="8" cy="8" r="6" />
+                <path d="M18.09 10.37A6 6 0 1 1 10.34 18" />
+                <path d="M7 6h1v4" />
+            </svg>
+        );
+
+        const Sparkles = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <path d="M12 3v18M3 12h18M6.5 6.5l11 11M6.5 17.5l11-11" />
+            </svg>
+        );
+
+        const X = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+        );
+
+        const Home = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <polyline points="9 22 9 12 15 12 15 22" />
+            </svg>
+        );
+
+        const Volume2 = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+            </svg>
+        );
+
+        const VolumeX = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <line x1="23" y1="9" x2="17" y2="15" />
+                <line x1="17" y1="9" x2="23" y2="15" />
+            </svg>
+        );
+
+        const CardList = () => {
+          const [allCards, setAllCards] = useState([]);
+          const [filteredCards, setFilteredCards] = useState([]);
+          const [selectedCard, setSelectedCard] = useState(null);
+          const [filters, setFilters] = useState({
+            type: 'all',
+            rarity: 'all',
+            stRace: 'all',
+            ndRace: 'all',
+            search: ''
+          });
+          const [isMuted, setIsMuted] = useState(false);
+          const [bgmEnabled, setBgmEnabled] = useState(() => {
+            const saved = localStorage.getItem('bgmEnabled');
+            return saved === 'true';
+          });
+
+          // 加载CSV数据
+          useEffect(() => {
+            fetch('./card_data.csv')
+              .then(response => response.text())
+              .then(csvText => {
+                Papa.parse(csvText, {
+                  header: true,
+                  skipEmptyLines: true,
+                  complete: (results) => {
+                    const cards = results.data.map(row => {
+                      let hp = row.hp;
+                      if (hp === '?') hp = 0;
+                      
+                      return {
+                        id: parseInt(row['#']),
+                        name: row.name,
+                        type: row.type,
+                        rarity: row.rarity || '',
+                        stRace: row.stRace || '',
+                        ndRace: row.ndRace || '',
+                        cost: parseFloat(row.cost) || 0,
+                        hp: parseInt(hp) || 0,
+                        atk: parseInt(row.atk) || 0,
+                        effect: row.effect || ''
+                      };
+                    }).filter(card => card.id && card.name);
+                    
+                    // 按ID排序
+                    cards.sort((a, b) => a.id - b.id);
+                    setAllCards(cards);
+                    setFilteredCards(cards);
+                  }
+                });
+              })
+              .catch(error => {
+                console.error('加载卡牌数据失败:', error);
+                alert('无法加载card_data.csv文件，请确保文件在同一目录下');
+              });
+          }, []);
+
+          // 自动恢复BGM
+          useEffect(() => {
+            if (bgmEnabled) {
+              SoundManager.bgmEnabled = true;
+              const startBGM = () => {
+                if (SoundManager.bgmEnabled && !SoundManager.bgmTimeout) {
+                  SoundManager.playBGM();
+                }
+                document.removeEventListener('click', startBGM);
+              };
+              document.addEventListener('click', startBGM);
+            }
+          }, [bgmEnabled]);
+
+          // 应用筛选
+          useEffect(() => {
+            let filtered = allCards;
+
+            if (filters.type !== 'all') {
+              filtered = filtered.filter(card => card.type === filters.type);
+            }
+            if (filters.rarity !== 'all') {
+              filtered = filtered.filter(card => card.rarity === filters.rarity);
+            }
+            if (filters.stRace !== 'all') {
+              filtered = filtered.filter(card => card.stRace === filters.stRace);
+            }
+            if (filters.ndRace !== 'all') {
+              filtered = filtered.filter(card => card.ndRace === filters.ndRace);
+            }
+            if (filters.search) {
+              const searchLower = filters.search.toLowerCase();
+              filtered = filtered.filter(card => 
+                card.name.toLowerCase().includes(searchLower) ||
+                card.effect.toLowerCase().includes(searchLower)
+              );
+            }
+
+            setFilteredCards(filtered);
+          }, [filters, allCards]);
+
+          // 获取唯一值用于筛选选项
+          const getUniqueValues = (field) => {
+            const values = [...new Set(allCards.map(card => card[field]).filter(v => v))];
+            return values.sort();
+          };
+
+          const toggleMute = () => {
+            SoundManager.toggleMute();
+            setIsMuted(SoundManager.isMuted);
+          };
+
+          const toggleBGM = () => {
+            SoundManager.toggleBGM();
+            setBgmEnabled(SoundManager.bgmEnabled);
+          };
+
+          // 卡牌颜色映射
+          const getCardColor = (type) => {
+            switch(type) {
+              case 'soldier': return 'from-gray-600 to-gray-800';
+              case 'support': return 'from-green-600 to-green-800';
+              case 'miracle': return 'from-purple-600 to-purple-800';
+              default: return 'from-gray-600 to-gray-800';
+            }
+          };
+
+          const getTypeText = (type) => {
+            switch(type) {
+              case 'soldier': return '士兵';
+              case 'support': return '支援';
+              case 'miracle': return '奇迹';
+              default: return type;
+            }
+          };
+
+          const getRarityColor = (rarity) => {
+            switch(rarity) {
+              case 'Common': return 'text-gray-400';
+              case 'Rare': return 'text-blue-400';
+              case 'Epic': return 'text-purple-400';
+              case 'Legendary': return 'text-yellow-400';
+              default: return 'text-gray-400';
+            }
+          };
+
+          // 获取卡牌图片路径
+          const getCardImagePath = (cardId) => {
+            // 尝试不同的图片格式
+            return `card_images/${cardId}.png`;
+          };
+
+          // 图片加载错误处理
+          const handleImageError = (e) => {
+            e.target.style.display = 'none';
+            e.target.nextSibling.style.display = 'flex';
+          };
+
+          const handleImageLoad = (e) => {
+            e.target.style.display = 'block';
+            e.target.nextSibling.style.display = 'none';
+          };
+
+          // 渲染小卡牌
+          const renderSmallCard = (card) => (
+            <div
+              key={card.id}
+              onClick={() => {
+                SoundManager.playSound('click');
+                setSelectedCard(card);
+              }}
+              onMouseEnter={() => SoundManager.playSound('hover')}
+              className={`
+                relative bg-gradient-to-br ${getCardColor(card.type)} 
+                rounded-lg p-3 cursor-pointer transform transition-all duration-200 
+                hover:scale-105 hover:shadow-xl border-2 border-gray-700
+              `}
+            >
+              <div className="text-white text-xs mb-1 flex justify-between items-center">
+                <span className="font-bold">#{card.id}</span>
+                <span className={`font-bold ${getRarityColor(card.rarity)}`}>
+                  {card.rarity}
+                </span>
+              </div>
+              <div className="text-white font-bold text-sm mb-2 truncate">{card.name}</div>
+              
+              {/* 图片缩略图区域 */}
+              <div className="relative w-full aspect-square mb-2 rounded overflow-hidden bg-gray-900 bg-opacity-50">
+                <img 
+                  src={getCardImagePath(card.id)}
+                  alt={card.name}
+                  onError={handleImageError}
+                  onLoad={handleImageLoad}
+                  className="w-full h-full object-cover"
+                  style={{ display: 'none' }}
+                />
+                <div className="w-full h-full flex items-center justify-center" style={{ display: 'flex' }}>
+                  <Sparkles size={32} className="text-gray-600" />
+                </div>
+              </div>
+              
+              <div className="text-yellow-300 text-xs mb-1">{getTypeText(card.type)}</div>
+              
+              <div className="flex justify-between items-center text-white text-sm">
+                <div className="flex items-center gap-1">
+                  <Coins size={14} className="text-yellow-400" />
+                  <span>{card.cost}</span>
+                </div>
+                {card.type === 'soldier' && (
+                  <>
+                    <div className="flex items-center gap-1">
+                      <Sword size={14} className="text-red-400" />
+                      <span>{card.atk}</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Heart size={14} className="text-pink-400" />
+                      <span>{card.hp}</span>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+
+          // 渲染详情卡牌
+          const renderDetailCard = (card) => (
+            <div className="fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center p-4">
+              <div className="max-w-6xl w-full flex gap-8">
+                {/* 左侧：大卡牌 */}
+                <div className="w-1/3">
+                  <div className={`
+                    bg-gradient-to-br ${getCardColor(card.type)} 
+                    rounded-2xl p-8 shadow-2xl border-4 border-yellow-500
+                  `}>
+                    <div className="text-white text-sm mb-3 flex justify-between items-center">
+                      <span className="font-bold text-lg">#{card.id}</span>
+                      <span className={`font-bold text-lg ${getRarityColor(card.rarity)}`}>
+                        {card.rarity}
+                      </span>
+                    </div>
+                    <div className="text-white font-bold text-3xl mb-4">{card.name}</div>
+                    <div className="text-yellow-300 text-xl mb-4">{getTypeText(card.type)}</div>
+                    
+                    {/* 种族标签 */}
+                    <div className="mb-4 flex gap-2">
+                      {card.stRace && (
+                        <span className="px-3 py-1 bg-blue-500 rounded-full text-white text-sm">
+                          {card.stRace}
+                        </span>
+                      )}
+                      {card.ndRace && (
+                        <span className="px-3 py-1 bg-green-500 rounded-full text-white text-sm">
+                          {card.ndRace}
+                        </span>
+                      )}
+                    </div>
+                    
+                    {/* 卡牌图片区域 */}
+                    <div className="bg-gray-900 bg-opacity-50 rounded-lg mb-4 aspect-square overflow-hidden relative">
+                      <img 
+                        src={getCardImagePath(card.id)}
+                        alt={card.name}
+                        onError={handleImageError}
+                        onLoad={handleImageLoad}
+                        className="w-full h-full object-cover"
+                        style={{ display: 'none' }}
+                      />
+                      <div className="w-full h-full flex items-center justify-center flex-col" style={{ display: 'flex' }}>
+                        <Sparkles size={64} className="text-gray-600" />
+                        <span className="text-gray-500 mt-2">暂无图片</span>
+                        <span className="text-gray-600 text-xs mt-1">将图片命名为 {card.id}.png</span>
+                        <span className="text-gray-600 text-xs">放入 card_images 文件夹</span>
+                      </div>
+                    </div>
+                    
+                    <div className="flex justify-around items-center text-white text-2xl border-t-2 border-gray-600 pt-4">
+                      <div className="flex items-center gap-2">
+                        <Coins size={24} className="text-yellow-400" />
+                        <span className="font-bold">{card.cost}</span>
+                      </div>
+                      {card.type === 'soldier' && (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <Sword size={24} className="text-red-400" />
+                            <span className="font-bold">{card.atk}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Heart size={24} className="text-pink-400" />
+                            <span className="font-bold">{card.hp}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 右侧：详细信息 */}
+                <div className="flex-1 bg-gray-800 rounded-2xl p-8 shadow-2xl overflow-y-auto max-h-[80vh]">
+                  <div className="flex justify-between items-start mb-6">
+                    <h2 className="text-3xl font-bold text-white">卡牌详情</h2>
+                    <button
+                      onClick={() => {
+                        SoundManager.playSound('click');
+                        setSelectedCard(null);
+                      }}
+                      className="p-2 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                    >
+                      <X size={24} className="text-white" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="bg-gray-700 rounded-lg p-4">
+                      <h3 className="text-yellow-400 font-bold mb-2 text-lg">基本信息</h3>
+                      <div className="text-white space-y-2">
+                        <p><span className="text-gray-400">卡牌ID:</span> #{card.id}</p>
+                        <p><span className="text-gray-400">名称:</span> {card.name}</p>
+                        <p><span className="text-gray-400">类型:</span> {getTypeText(card.type)}</p>
+                        <p><span className="text-gray-400">稀有度:</span> <span className={getRarityColor(card.rarity)}>{card.rarity}</span></p>
+                        {card.stRace && <p><span className="text-gray-400">主种族:</span> {card.stRace}</p>}
+                        {card.ndRace && <p><span className="text-gray-400">副种族:</span> {card.ndRace}</p>}
+                      </div>
+                    </div>
+
+                    <div className="bg-gray-700 rounded-lg p-4">
+                      <h3 className="text-yellow-400 font-bold mb-2 text-lg">属性</h3>
+                      <div className="text-white space-y-2">
+                        <p><span className="text-gray-400">费用:</span> {card.cost}</p>
+                        {card.type === 'soldier' && (
+                          <>
+                            <p><span className="text-gray-400">攻击力:</span> {card.atk}</p>
+                            <p><span className="text-gray-400">生命值:</span> {card.hp}</p>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {card.effect && (
+                      <div className="bg-gray-700 rounded-lg p-4">
+                        <h3 className="text-yellow-400 font-bold mb-2 text-lg">效果描述</h3>
+                        <p className="text-white leading-relaxed whitespace-pre-wrap">{card.effect}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+
+          return (
+            <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900">
+              {/* 固定顶部 */}
+              <div className="sticky top-0 z-40 bg-gray-900 bg-opacity-95 backdrop-blur-sm shadow-lg">
+                {/* 标题栏 */}
+                <div className="border-b border-gray-700">
+                  <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
+                    <h1 className="text-3xl font-bold text-white flex items-center gap-2">
+                      <Sparkles size={32} className="text-yellow-400" />
+                      卡牌图鉴
+                    </h1>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          SoundManager.playSound('click');
+                          window.location.href = 'index.html';
+                        }}
+                        className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-bold flex items-center gap-2"
+                      >
+                        <Home size={20} />
+                        主界面
+                      </button>
+                      <button
+                        onClick={toggleMute}
+                        className="px-3 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-bold"
+                      >
+                        {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                      </button>
+                      <button
+                        onClick={toggleBGM}
+                        className={`px-4 py-2 ${bgmEnabled ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 hover:bg-gray-700'} text-white rounded-lg font-bold`}
+                      >
+                        BGM
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 筛选栏 */}
+                <div className="max-w-7xl mx-auto px-4 py-4">
+                  <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+                    {/* 搜索框 */}
+                    <input
+                      type="text"
+                      placeholder="搜索卡牌名称或效果..."
+                      value={filters.search}
+                      onChange={(e) => setFilters({...filters, search: e.target.value})}
+                      className="col-span-1 md:col-span-2 px-4 py-2 bg-gray-700 text-white rounded-lg border-2 border-gray-600 focus:border-blue-500 focus:outline-none"
+                    />
+
+                    {/* 类型筛选 */}
+                    <select
+                      value={filters.type}
+                      onChange={(e) => setFilters({...filters, type: e.target.value})}
+                      className="px-4 py-2 bg-gray-700 text-white rounded-lg border-2 border-gray-600 focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="all">所有类型</option>
+                      <option value="soldier">士兵</option>
+                      <option value="support">支援</option>
+                      <option value="miracle">奇迹</option>
+                    </select>
+
+                    {/* 稀有度筛选 */}
+                    <select
+                      value={filters.rarity}
+                      onChange={(e) => setFilters({...filters, rarity: e.target.value})}
+                      className="px-4 py-2 bg-gray-700 text-white rounded-lg border-2 border-gray-600 focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="all">所有稀有度</option>
+                      {getUniqueValues('rarity').map(rarity => (
+                        <option key={rarity} value={rarity}>{rarity}</option>
+                      ))}
+                    </select>
+
+                    {/* 主种族筛选 */}
+                    <select
+                      value={filters.stRace}
+                      onChange={(e) => setFilters({...filters, stRace: e.target.value})}
+                      className="px-4 py-2 bg-gray-700 text-white rounded-lg border-2 border-gray-600 focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="all">所有主种族</option>
+                      {getUniqueValues('stRace').map(race => (
+                        <option key={race} value={race}>{race}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* 统计信息 */}
+                  <div className="mt-3 flex justify-between items-center text-white">
+                    <span>显示 <span className="text-yellow-400 font-bold">{filteredCards.length}</span> / {allCards.length} 张卡牌</span>
+                    <button
+                      onClick={() => {
+                        SoundManager.playSound('click');
+                        setFilters({ type: 'all', rarity: 'all', stRace: 'all', ndRace: 'all', search: '' });
+                      }}
+                      className="px-4 py-1 bg-gray-600 hover:bg-gray-700 rounded text-sm"
+                    >
+                      清除筛选
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* 卡牌列表 */}
+              <div className="max-w-7xl mx-auto px-4 py-6">
+                {filteredCards.length === 0 ? (
+                  <div className="text-center py-20">
+                    <div className="text-gray-400 text-xl mb-4">没有找到符合条件的卡牌</div>
+                    <button
+                      onClick={() => setFilters({ type: 'all', rarity: 'all', stRace: 'all', ndRace: 'all', search: '' })}
+                      className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold"
+                    >
+                      重置筛选
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                    {filteredCards.map(card => renderSmallCard(card))}
+                  </div>
+                )}
+              </div>
+
+              {/* 详情弹窗 */}
+              {selectedCard && renderDetailCard(selectedCard)}
+            </div>
+          );
+        };
+
+        ReactDOM.render(<CardList />, document.getElementById('root'));
+    </script>
+</body>
+</html>

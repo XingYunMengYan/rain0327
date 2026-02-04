@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>四路线卡牌对战 — AI对战模式</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+    <script src="shared.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ══════════════════════════════════════════════════════════
+    // AI 决策引擎（三难度）
+    // ══════════════════════════════════════════════════════════
+    const AIEngine = {
+      easy(gameState, player) {
+        const hand = gameState[player].hand;
+        const coins = gameState[player].coins;
+        const bf = gameState[player].battlefield;
+        const affordable = hand.filter(c => c.type === 'battlefield' && c.cost <= coins);
+        if (affordable.length > 0) {
+          const card = affordable[Math.floor(Math.random() * affordable.length)];
+          const emptyLanes = bf.map((c, i) => c === null ? i : -1).filter(i => i >= 0);
+          if (emptyLanes.length > 0) {
+            const lane = emptyLanes[Math.floor(Math.random() * emptyLanes.length)];
+            return { action: 'playCard', card, lane };
+          }
+        }
+        const support = hand.filter(c => (c.type === 'support' || c.type === 'miracle') && (c.type === 'miracle' ? true : c.cost <= coins));
+        if (support.length > 0 && Math.random() > 0.5) {
+          const card = support[Math.floor(Math.random() * support.length)];
+          return { action: 'useSupport', card };
+        }
+        return { action: 'pass' };
+      },
+
+      medium(gameState, player) {
+        const hand = gameState[player].hand;
+        const coins = gameState[player].coins;
+        const bf = gameState[player].battlefield;
+        const affordable = hand.filter(c => c.type === 'battlefield' && c.cost <= coins);
+        if (affordable.length > 0) {
+          affordable.sort((a, b) => (b.atk / Math.max(b.cost, 0.5)) - (a.atk / Math.max(a.cost, 0.5)));
+          const card = affordable[0];
+          const emptyLanes = bf.map((c, i) => c === null ? i : -1).filter(i => i >= 0);
+          if (emptyLanes.length > 0) {
+            const opponent = player === 'red' ? 'blue' : 'red';
+            const oppBF = gameState[opponent].battlefield;
+            const contested = emptyLanes.filter(i => oppBF[i] !== null);
+            const lane = contested.length > 0 ? contested[Math.floor(Math.random() * contested.length)] : emptyLanes[Math.floor(Math.random() * emptyLanes.length)];
+            return { action: 'playCard', card, lane };
+          }
+        }
+        const support = hand.filter(c => c.type === 'support' && c.cost <= coins);
+        if (support.length > 0 && coins >= 3) return { action: 'useSupport', card: support[0] };
+        return { action: 'pass' };
+      },
+
+      hard(gameState, player) {
+        const hand = gameState[player].hand;
+        const coins = gameState[player].coins;
+        const bf = gameState[player].battlefield;
+        const opponent = player === 'red' ? 'blue' : 'red';
+        const oppBF = gameState[opponent].battlefield;
+        const myHP = gameState[player].health;
+        const threats = oppBF.map((c, i) => c ? { lane: i, atk: c.atk, hp: c.hp } : null).filter(Boolean);
+        threats.sort((a, b) => b.atk - a.atk);
+        const miracle = hand.find(c => c.type === 'miracle');
+        if (miracle && myHP <= 15) return { action: 'useSupport', card: miracle };
+        const affordable = hand.filter(c => c.type === 'battlefield' && c.cost <= coins);
+        if (affordable.length > 0) {
+          affordable.sort((a, b) => b.atk - a.atk);
+          const card = affordable[0];
+          const emptyLanes = bf.map((c, i) => c === null ? i : -1).filter(i => i >= 0);
+          if (emptyLanes.length > 0) {
+            let targetLane = emptyLanes[0];
+            for (const t of threats) { if (emptyLanes.includes(t.lane)) { targetLane = t.lane; break; } }
+            return { action: 'playCard', card, targetLane };
+          }
+        }
+        const support = hand.filter(c => c.type === 'support' && c.cost <= coins);
+        if (support.length > 0 && coins >= 5) return { action: 'useSupport', card: support[0] };
+        return { action: 'pass' };
+      },
+
+      pickCards(cards, difficulty) {
+        const battlefield = cards.filter(c => c.type === 'battlefield');
+        const support = cards.filter(c => c.type === 'support');
+        if (difficulty === 'easy') {
+          const shuffled = [...cards].sort(() => Math.random() - 0.5);
+          return [shuffled[0], shuffled[1]];
+        } else if (difficulty === 'medium') {
+          battlefield.sort((a, b) => b.atk - a.atk);
+          return battlefield.slice(0, 2).length === 2 ? battlefield.slice(0, 2) : cards.slice(0, 2);
+        } else {
+          battlefield.sort((a, b) => b.atk - a.atk);
+          const pick1 = battlefield[0];
+          const pick2 = support[0] || battlefield[1] || cards.find(c => c !== pick1);
+          return [pick1, pick2].filter(Boolean);
+        }
+      }
+    };
+
+    // ══════════════════════════════════════════════════════════
+    // 主组件
+    // ══════════════════════════════════════════════════════════
+    const AIGame = () => {
+      const [uiReady, setUiReady] = useState(false);
+      useEffect(() => { window.GameUILoader.load().then(() => setUiReady(true)); window.SoundManager.restoreFromStorage(); }, []);
+
+      const [allCards, setAllCards] = useState([]);
+      useEffect(() => { window.loadCards().then(cards => setAllCards(cards)).catch(err => { console.error('加载卡牌失败', err); alert('无法加载 card_data.csv'); }); }, []);
+
+      const INIT_STATE = {
+        turn: 0, phase: 'idle',
+        red:  { health: 30, coins: 0, hand: [], battlefield: [null,null,null,null], miracleDrawn: [30] },
+        blue: { health: 30, coins: 0, hand: [], battlefield: [null,null,null,null], miracleDrawn: [30] },
+        deck: [], miracleDeck: [], discardPile: [], initialCards: [], initialCardsBlue: [], selectedCard: null, log: []
+      };
+
+      const [gameState, setGameState] = useState(INIT_STATE);
+      const [gamePhase, setGamePhase] = useState('notStarted');
+      const [winner, setWinner] = useState(null);
+      const [battleAnimation, setBattleAnimation] = useState({ active: false, lane: -1 });
+      const [cardShowOverlay, setCardShowOverlay] = useState(null);
+      const [myRole, setMyRole] = useState(null);
+      const [aiRole, setAiRole] = useState(null);
+      const [difficulty, setDifficulty] = useState('medium');
+      const [showRoulette, setShowRoulette] = useState(false);
+      const [rouletteResult, setRouletteResult] = useState(null);
+      const aiThinking = useRef(false);
+
+      const addLog = useCallback((msg) => { setGameState(prev => ({ ...prev, log: [...prev.log, msg] })); }, []);
+      const showCardOverlay = useCallback((card) => {
+        setCardShowOverlay(card);
+        const dur = card.type === 'miracle' ? 2000 : 1000;
+        window.SoundManager.playSound(card.type === 'miracle' ? 'miracle' : 'place');
+        setTimeout(() => setCardShowOverlay(null), dur);
+      }, []);
+
+      const initGame = useCallback(() => {
+        if (!allCards.length) return;
+        const regular = allCards.filter(c => c.type !== 'miracle');
+        const miracles = allCards.filter(c => c.type === 'miracle');
+        const deck = window.shuffleArray(regular.map(window.createCard));
+        const miracleDeck = window.shuffleArray(miracles.map(window.createCard));
+        const redSix = deck.slice(0, 6), blueSix = deck.slice(6, 12), rest = deck.slice(12);
+        const mDeck = [...miracleDeck], redM = mDeck.pop(), blueM = mDeck.pop();
+        setGameState({ ...INIT_STATE, red: { ...INIT_STATE.red, hand: redM ? [redM] : [] }, blue: { ...INIT_STATE.blue, hand: blueM ? [blueM] : [] }, deck: rest, miracleDeck: mDeck, initialCards: redSix, initialCardsBlue: blueSix, log: ['游戏初始化完成', '红蓝双方各抽取1张奇迹牌'] });
+        setGamePhase('notStarted');
+        setWinner(null);
+      }, [allCards]);
+
+      useEffect(() => { if (allCards.length) initGame(); }, [allCards, initGame]);
+      useEffect(() => { const handler = () => setWinner(null); window.addEventListener('gameui:review', handler); return () => window.removeEventListener('gameui:review', handler); }, []);
+
+      const spinRoulette = () => {
+        setShowRoulette(true);
+        window.SoundManager.playSound('click');
+        setTimeout(() => {
+          const result = Math.random() > 0.5 ? 'red' : 'blue';
+          setRouletteResult(result);
+          setMyRole(result);
+          setAiRole(result === 'red' ? 'blue' : 'red');
+          addLog(`抽签结果：你是 ${result === 'red' ? '红方' : '蓝方'}`);
+          addLog(`AI 是 ${result === 'red' ? '蓝方' : '红方'} | 难度：${difficulty === 'easy' ? '简单' : difficulty === 'medium' ? '中等' : '困难'}`);
+          setTimeout(() => { setShowRoulette(false); setGamePhase('redPicking'); addLog('--- 选牌阶段开始 ---'); }, 1500);
+        }, 2000);
+      };
+
+      const pickCard = (card) => {
+        const isMyTurn = (gamePhase === 'redPicking' && myRole === 'red') || (gamePhase === 'bluePicking' && myRole === 'blue');
+        if (!isMyTurn) return;
+        window.SoundManager.playSound('click');
+
+        if (gamePhase === 'redPicking') {
+          const newHand = [...gameState.red.hand, card];
+          const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
+          if (newHand.length === 3) {
+            setGameState(prev => ({ ...prev, red: { ...prev.red, hand: newHand }, initialCards: prev.initialCardsBlue, deck: window.shuffleArray([...prev.deck, ...remaining]) }));
+            setGamePhase('bluePicking');
+            addLog('红方选牌完成');
+            if (aiRole === 'blue') setTimeout(() => aiPickCards('blue'), 800);
+          } else {
+            setGameState(prev => ({ ...prev, red: { ...prev.red, hand: newHand }, initialCards: remaining }));
+            addLog(`红方选择了 ${card.name}`);
+          }
+        } else if (gamePhase === 'bluePicking') {
+          const newHand = [...gameState.blue.hand, card];
+          const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
+          if (newHand.length === 3) {
+            setGameState(prev => ({ ...prev, blue: { ...prev.blue, hand: newHand }, initialCards: [], deck: window.shuffleArray([...prev.deck, ...remaining]) }));
+            setGamePhase('playing');
+            addLog('蓝方选牌完成 → 选牌阶段结束');
+          } else {
+            setGameState(prev => ({ ...prev, blue: { ...prev.blue, hand: newHand }, initialCards: remaining }));
+            addLog(`蓝方选择了 ${card.name}`);
+          }
+        }
+      };
+
+      const aiPickCards = (player) => {
+        const picked = AIEngine.pickCards(gameState.initialCards, difficulty);
+        const remaining = gameState.initialCards.filter(c => !picked.includes(c));
+        setGameState(prev => ({ ...prev, [player]: { ...prev[player], hand: [...prev[player].hand, ...picked] }, initialCards: player === 'red' ? prev.initialCardsBlue : [], deck: window.shuffleArray([...prev.deck, ...remaining]) }));
+        addLog(`${player === 'red' ? '红方' : '蓝方'}(AI) 已完成选牌`);
+        if (player === 'red') { setGamePhase('bluePicking'); if (aiRole === 'blue') setTimeout(() => aiPickCards('blue'), 800); } else setGamePhase('playing');
+      };
+
+      const startTurn = () => {
+        const newTurn = gameState.turn + 1, coins = Math.min(newTurn, 10), logs = [`--- 第${newTurn}回合开始 ---`, `双方获得 ${coins} 金币`];
+        let deck = [...gameState.deck], redHand = [...gameState.red.hand], blueHand = [...gameState.blue.hand];
+        if (newTurn >= 2) { for (let i = 0; i < 2; i++) { const r = deck.pop(); if (r) redHand.push(r); const b = deck.pop(); if (b) blueHand.push(b); } logs.push('双方各抽2张牌'); } else logs.push('第一回合不抽牌');
+        setGameState(prev => ({ ...prev, turn: newTurn, phase: 'redDeploy', deck, red: { ...prev.red, coins, hand: redHand }, blue: { ...prev.blue, coins, hand: blueHand }, log: [...prev.log, ...logs] }));
+      };
+
+      const selectCard = (card, player) => {
+        if (player !== myRole || gameState.phase === 'idle' || gameState.phase === 'battle') return;
+        const isRedPhase = gameState.phase === 'redDeploy' || gameState.phase === 'redSupport';
+        if ((isRedPhase && player !== 'red') || (!isRedPhase && player !== 'blue')) return;
+        if (gameState.selectedCard?.instanceId === card.instanceId) { setGameState(prev => ({ ...prev, selectedCard: null })); return; }
+        setGameState(prev => ({ ...prev, selectedCard: card }));
+      };
+
+      const playCard = (laneIndex) => {
+        const card = gameState.selectedCard;
+        if (!card || card.type !== 'battlefield') return;
+        const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
+        if (player !== myRole) return;
+        const playerState = gameState[player];
+        if (playerState.coins < card.cost) { addLog('金币不足！'); return; }
+        if (playerState.battlefield[laneIndex] !== null) { addLog('该路线已有卡牌！'); return; }
+        window.SoundManager.playSound('place');
+        const bf = [...playerState.battlefield]; bf[laneIndex] = { ...card };
+        setGameState(prev => ({ ...prev, [player]: { ...playerState, battlefield: bf, hand: playerState.hand.filter(c => c.instanceId !== card.instanceId), coins: playerState.coins - card.cost }, selectedCard: null, log: [...prev.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了 ${card.name}`] }));
+      };
+
+      const useCardOnTarget = (targetPlayer, laneIndex) => {
+        const card = gameState.selectedCard;
+        if (!card || (card.type !== 'support' && card.type !== 'miracle')) return;
+        const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
+        if (player !== myRole) return;
+        const playerState = gameState[player], target = gameState[targetPlayer].battlefield[laneIndex];
+        if (!target) { addLog('目标位置没有单位！'); return; }
+        const cost = card.type === 'miracle' ? 0 : card.cost;
+        if (playerState.coins < cost) { addLog('金币不足！'); return; }
+        addLog(`${player === 'red' ? '红方' : '蓝方'}对 ${target.name} 使用了 ${card.name}`);
+        showCardOverlay(card);
+        setGameState(prev => ({ ...prev, [player]: { ...playerState, hand: playerState.hand.filter(c => c.instanceId !== card.instanceId), coins: playerState.coins - cost }, discardPile: [...prev.discardPile, card], selectedCard: null }));
+      };
+
+      const confirmUse = () => {
+        const card = gameState.selectedCard; if (!card) return;
+        const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
+        if (player !== myRole) return;
+        const playerState = gameState[player], cost = card.type === 'miracle' ? 0 : card.cost;
+        if (playerState.coins < cost) { addLog('金币不足！'); return; }
+        addLog(`${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`);
+        showCardOverlay(card);
+        setGameState(prev => ({ ...prev, [player]: { ...playerState, hand: playerState.hand.filter(c => c.instanceId !== card.instanceId), coins: playerState.coins - cost }, discardPile: [...prev.discardPile, card], selectedCard: null }));
+      };
+
+      const endPhase = () => {
+        const next = { redDeploy: 'blueDeploy', blueDeploy: 'redSupport', redSupport: 'battle' }, target = next[gameState.phase];
+        if (target === 'battle') { setGameState(prev => ({ ...prev, phase: 'battle', selectedCard: null, log: [...prev.log, '--- 战斗阶段 ---'] })); setTimeout(resolveBattle, 500); }
+        else { const names = { blueDeploy: '蓝方部署阶段', redSupport: '红方支援阶段' }; setGameState(prev => ({ ...prev, phase: target, selectedCard: null, log: [...prev.log, `--- ${names[target]} ---`] })); }
+      };
+
+      useEffect(() => {
+        if (!aiRole || gamePhase !== 'playing' || gameState.phase === 'idle' || gameState.phase === 'battle') return;
+        const isAITurn = (gameState.phase === 'redDeploy' && aiRole === 'red') || (gameState.phase === 'blueDeploy' && aiRole === 'blue') || (gameState.phase === 'redSupport' && aiRole === 'red');
+        if (isAITurn && !aiThinking.current) { aiThinking.current = true; setTimeout(() => { executeAITurn(); aiThinking.current = false; }, 1200); }
+      }, [gameState.phase, aiRole, gamePhase]);
+
+      const executeAITurn = () => {
+        const aiFunc = difficulty === 'easy' ? AIEngine.easy : difficulty === 'medium' ? AIEngine.medium : AIEngine.hard;
+        const decision = aiFunc(gameState, aiRole);
+        if (decision.action === 'playCard') {
+          const { card, lane, targetLane } = decision, laneIdx = targetLane !== undefined ? targetLane : lane, playerState = gameState[aiRole];
+          if (playerState.coins >= card.cost && playerState.battlefield[laneIdx] === null) {
+            window.SoundManager.playSound('place');
+            const bf = [...playerState.battlefield]; bf[laneIdx] = { ...card };
+            setGameState(prev => ({ ...prev, [aiRole]: { ...playerState, battlefield: bf, hand: playerState.hand.filter(c => c.instanceId !== card.instanceId), coins: playerState.coins - card.cost }, log: [...prev.log, `${aiRole === 'red' ? '红方' : '蓝方'}(AI) 在路线${laneIdx+1}放置了 ${card.name}`] }));
+            setTimeout(() => endPhase(), 800);
+            return;
+          }
+        } else if (decision.action === 'useSupport') {
+          const { card } = decision, playerState = gameState[aiRole], cost = card.type === 'miracle' ? 0 : card.cost;
+          if (playerState.coins >= cost) {
+            addLog(`${aiRole === 'red' ? '红方' : '蓝方'}(AI) 使用了 ${card.name}`);
+            showCardOverlay(card);
+            setGameState(prev => ({ ...prev, [aiRole]: { ...playerState, hand: playerState.hand.filter(c => c.instanceId !== card.instanceId), coins: playerState.coins - cost }, discardPile: [...prev.discardPile, card] }));
+            setTimeout(() => endPhase(), 1500);
+            return;
+          }
+        }
+        setTimeout(() => endPhase(), 500);
+      };
+
+      const resolveBattle = async () => {
+        let redBF = gameState.red.battlefield.map(c => c ? {...c} : null), blueBF = gameState.blue.battlefield.map(c => c ? {...c} : null), redHP = gameState.red.health, blueHP = gameState.blue.health, discard = [...gameState.discardPile], logs = [];
+        for (let i = 0; i < 4; i++) {
+          setBattleAnimation({ active: true, lane: i }); window.SoundManager.playSound('attack'); await new Promise(r => setTimeout(r, 1000));
+          const rc = redBF[i], bc = blueBF[i];
+          if (rc && bc) { rc.hp -= bc.atk; bc.hp -= rc.atk; logs.push(`路线${i+1}: ${rc.name}(${rc.hp}HP) VS ${bc.name}(${bc.hp}HP)`); if (rc.hp <= 0) { discard.push(rc); redBF[i] = null; logs.push(`  红方 ${rc.name} 被击败`); } if (bc.hp <= 0) { discard.push(bc); blueBF[i] = null; logs.push(`  蓝方 ${bc.name} 被击败`); } }
+          else if (rc) { blueHP -= rc.atk; logs.push(`路线${i+1}: ${rc.name} 攻击蓝方，造成 ${rc.atk} 伤害`); }
+          else if (bc) { redHP -= bc.atk; logs.push(`路线${i+1}: ${bc.name} 攻击红方，造成 ${bc.atk} 伤害`); }
+        }
+        setBattleAnimation({ active: false, lane: -1 });
+        let newMDeck = [...gameState.miracleDeck], redHand = [...gameState.red.hand], blueHand = [...gameState.blue.hand], redDrawn = [...gameState.red.miracleDrawn], blueDrawn = [...gameState.blue.miracleDrawn];
+        const milestones = [25, 20, 15, 10, 5], drawMiracle = (hp, drawn, hand) => { const hit = milestones.some(m => hp <= m && !drawn.includes(m)); if (hit) { const newDrawn = [...drawn, ...milestones.filter(m => hp <= m && !drawn.includes(m))]; const card = newMDeck.pop(); if (card) { hand.push(card); return { drawn: newDrawn, drewName: card.name }; } return { drawn: newDrawn, drewName: null }; } return { drawn, drewName: null }; };
+        if (redHP < gameState.red.health) { const res = drawMiracle(redHP, redDrawn, redHand); redDrawn = res.drawn; if (res.drewName) logs.push(`红方血量降至 ${redHP}，抽取奇迹牌：${res.drewName}`); }
+        if (blueHP < gameState.blue.health) { const res = drawMiracle(blueHP, blueDrawn, blueHand); blueDrawn = res.drawn; if (res.drewName) logs.push(`蓝方血量降至 ${blueHP}，抽取奇迹牌：${res.drewName}`); }
+        if (redHP <= 0 || blueHP <= 0) { const w = redHP > blueHP ? '红方' : (blueHP > redHP ? '蓝方' : '平局'); logs.push(`🎉 ${w === '平局' ? '平局' : w + '获胜！'}`); window.SoundManager.playSound('victory'); setWinner(w); }
+        else logs.push('战斗结算完成');
+        setGameState(prev => ({ ...prev, phase: 'idle', red: { ...prev.red, battlefield: redBF, health: redHP, hand: redHand, miracleDrawn: redDrawn }, blue: { ...prev.blue, battlefield: blueBF, health: blueHP, hand: blueHand, miracleDrawn: blueDrawn }, miracleDeck: newMDeck, discardPile: discard, log: [...prev.log, ...logs] }));
+        setTimeout(() => { setGameState(prev => { if (prev.deck.length === 0 && prev.red.hand.length === 0 && prev.blue.hand.length === 0 && !winner) { const w = prev.red.health > prev.blue.health ? '红方' : (prev.blue.health > prev.red.health ? '蓝方' : '平局'); setWinner(w); window.SoundManager.playSound('victory'); return { ...prev, log: [...prev.log, '牌库耗尽', `${w === '平局' ? '平局' : w + '获胜'}`] }; } return prev; }); }, 100);
+      };
+
+      const reset = () => { setWinner(null); setGamePhase('notStarted'); setBattleAnimation({ active: false, lane: -1 }); setMyRole(null); setAiRole(null); setRouletteResult(null); initGame(); };
+
+      if (!uiReady) return <div className="text-white text-center mt-40 text-xl">加载中…</div>;
+
+      if (gamePhase === 'notStarted' && !myRole) {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center p-4">
+            <div className="bg-gray-800 rounded-2xl p-8 max-w-md w-full shadow-2xl border-2 border-purple-500">
+              <h1 className="text-3xl font-bold text-white text-center mb-6">选择 AI 难度</h1>
+              <div className="space-y-4">
+                <button onClick={() => { setDifficulty('easy'); spinRoulette(); }} className="w-full py-4 rounded-lg font-bold text-xl bg-gray-700 hover:bg-green-600 text-white transition-all">😊 简单 - 随机出牌</button>
+                <button onClick={() => { setDifficulty('medium'); spinRoulette(); }} className="w-full py-4 rounded-lg font-bold text-xl bg-gray-700 hover:bg-yellow-600 text-white transition-all">🤔 中等 - 优先高攻</button>
+                <button onClick={() => { setDifficulty('hard'); spinRoulette(); }} className="w-full py-4 rounded-lg font-bold text-xl bg-gray-700 hover:bg-red-600 text-white transition-all">😈 困难 - 策略评估</button>
+              </div>
+              <button onClick={() => window.location.href = 'index.html'} className="w-full mt-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-bold">返回主界面</button>
+            </div>
+          </div>
+        );
+      }
+
+      if (showRoulette) {
+        return (
+          <div className="fixed inset-0 bg-black bg-opacity-90 z-[200] flex items-center justify-center">
+            <div className="text-center">
+              <h1 className="text-4xl font-bold text-white mb-8">红蓝抽签中...</h1>
+              <div className="relative w-64 h-64 mx-auto">
+                <div className="absolute inset-0 rounded-full border-8 border-gray-700 overflow-hidden animate-spin" style={{ animationDuration: '0.5s' }}>
+                  <div className="absolute top-0 left-0 w-full h-1/2 bg-red-600"></div>
+                  <div className="absolute bottom-0 left-0 w-full h-1/2 bg-blue-600"></div>
+                </div>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-4 h-20 bg-yellow-400 rounded-full shadow-2xl" style={{ transform: 'translateY(-60px)' }}></div>
+                </div>
+              </div>
+              {rouletteResult && <div className="mt-8 text-3xl font-bold animate-pulse text-white">{rouletteResult === 'red' ? '🔴 你是红方！' : '🔵 你是蓝方！'}</div>}
+            </div>
+          </div>
+        );
+      }
+
+      if (gamePhase === 'redPicking' && aiRole === 'red') setTimeout(() => aiPickCards('red'), 500);
+
+      return <GameUI gameState={gameState} gamePhase={gamePhase} allCards={allCards} winner={winner} battleAnimation={battleAnimation} cardShowOverlay={cardShowOverlay} onStartPicking={() => {}} onPickCard={pickCard} onStartTurn={startTurn} onSelectCard={selectCard} onPlayCard={playCard} onUseCardOnTarget={useCardOnTarget} onConfirmUse={confirmUse} onEndPhase={endPhase} onReset={reset} hideOpponentHand={true} myRole={myRole} />;
+    };
+
+    ReactDOM.render(<AIGame />, document.getElementById('root'));
+    </script>
+</body>
+</html>
