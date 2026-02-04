@@ -318,16 +318,30 @@
             </div>
           )}
 
-          {/* ── 选牌阶段 ── */}
+          {/* ── 选牌阶段弹窗 ── */}
           {(gamePhase === 'redPicking' || gamePhase === 'bluePicking') && (
-            <div className="mb-3 p-4 bg-yellow-900/30 rounded-xl border-2 border-yellow-500">
-              <h2 className="text-xl font-bold text-yellow-300 mb-3 text-center">
-                {gamePhase === 'redPicking' ? '红方选牌' : '蓝方选牌'} — 请从6张牌中选择2张
-              </h2>
-              <div className="grid grid-cols-3 gap-3 justify-items-center">
-                {gameState.initialCards.map(card => (
-                  <div key={card.instanceId}><Card card={card} onClick={() => { SM.playSound('click'); onPickCard(card); }} showPick /></div>
-                ))}
+            <div className="fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center p-4" 
+                 onClick={(e) => e.target === e.currentTarget && null /* 防止点击背景关闭 */}>
+              <div className="bg-gradient-to-br from-yellow-900 to-orange-900 rounded-xl p-8 max-w-4xl max-h-[90vh] overflow-y-auto shadow-2xl border-4 border-yellow-500"
+                   onClick={e => e.stopPropagation()}>
+                <h2 className="text-3xl font-bold text-yellow-300 mb-2 text-center animate-pulse">
+                  {gamePhase === 'redPicking' ? '🔴 红方选牌' : '🔵 蓝方选牌'}
+                </h2>
+                <p className="text-xl text-yellow-200 mb-6 text-center">
+                  请从以下6张牌中选择2张加入手牌
+                </p>
+                <div className="grid grid-cols-3 gap-4 justify-items-center mb-4">
+                  {gameState.initialCards.map(card => (
+                    <div key={card.instanceId}>
+                      <Card card={card} 
+                            onClick={() => { SM.playSound('click'); onPickCard(card); }} 
+                            showPick />
+                    </div>
+                  ))}
+                </div>
+                <div className="text-center text-yellow-200 text-sm mt-4">
+                  选择完成后窗口将自动关闭
+                </div>
               </div>
             </div>
           )}

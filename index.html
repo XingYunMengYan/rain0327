@@ -176,13 +176,13 @@
                     }
                 },
                 {
-                    title: '局域网联机',
-                    description: '与同一网络的玩家对战',
+                    title: '在线对战',
+                    description: '通过房间号与好友对战',
                     color: 'from-orange-600 to-red-600',
                     icon: '🌐',
                     action: () => {
                         SoundManager.playSound('click');
-                        alert('局域网联机模式开发中...');
+                        window.location.href = 'gameOnline.html';
                     }
                 },
                 {
@@ -277,7 +277,7 @@
             const menuItems = [
                 () => window.location.href = 'localGame.html',
                 () => window.location.href = 'gameAI.html',
-                () => alert('局域网联机模式开发中...'),
+                () => window.location.href = 'gameOnline.html',
                 () => window.location.href = 'cardList.html'
             ];
             SoundManager.playSound('click');
