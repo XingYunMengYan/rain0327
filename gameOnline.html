@@ -474,22 +474,20 @@
                 blue: { ...INIT_STATE.blue, hand: blueM ? [blueM] : [] },
                 deck: rest,
                 miracleDeck: mDeck,
-                // 【修改点】：确保键名与 UI 渲染时一致
                 redInitialPool: redSix,
                 blueInitialPool: blueSix,
                 log: [
                     '🌐 在线游戏开始！',
                     `你是${gameManagerRef.current.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}`,
-                    '双方各抽取1张奇迹牌',
-                    '--- 选牌阶段开始 ---'
+                    '双方同时进行秘密选牌...',
+                    '--- 选牌阶段 ---'
                 ]
             });
-            setGamePhase('Picking');
+            setGamePhase('picking'); 
             setScreen('game');
         };
 
-        // 游戏操作函数（简化版，保留核心逻辑）
-       const pickCard = (card) => {
+        const pickCard = (card) => {
             if (gamePhase !== 'picking') return;
             const mySide = gameManagerRef.current.playerSide;
             window.SoundManager.playSound('click');
@@ -524,10 +522,15 @@
                 const isOpponentDone = newHand.length >= 4;
                 const mySide = gameManagerRef.current.playerSide;
                 const myPoolKey = mySide === 'red' ? 'redInitialPool' : 'blueInitialPool';
-                const amIDone = prev[myPoolKey].length === 0;
+                
+                // 检查我自己是否也选完了
+                const amIDone = prev[mySide].hand.length >= 4 || prev[myPoolKey].length === 0;
 
                 if (isOpponentDone && amIDone) {
-                    setTimeout(() => setGamePhase('playing'), 500);
+                    setTimeout(() => {
+                        setGamePhase('playing');
+                        setGameState(s => ({...s, log: [...s.log, '双方选牌完成 → 游戏开始！']}));
+                    }, 500);
                 }
 
                 return {
@@ -537,89 +540,6 @@
                     log: [...prev.log, `${opponentSide === 'red' ? '红方' : '蓝方'}选了一张牌`]
                 };
             });
-        };
-            } else if (phase === 'bluePicking') {
-                setGameState(prev => {
-                    const newHand = [...prev.blue.hand, card];
-                    const remaining = prev.initialCards.filter(c => c.instanceId !== card.instanceId);
-                    if (newHand.length === 3) {
-                        setGamePhase('playing');
-                        return {
-                            ...prev,
-                            blue: { ...prev.blue, hand: newHand },
-                            initialCards: [],
-                            deck: window.shuffleArray([...prev.deck, ...remaining]),
-                            log: [...prev.log, '蓝方选牌完成 → 选牌阶段结束']
-                        };
-                    }
-                    return {
-                        ...prev,
-                        blue: { ...prev.blue, hand: newHand },
-                        initialCards: remaining,
-                        log: [...prev.log, `蓝方选择了 ${card.name}`]
-                    };
-                });
-            }
-        };
-
-        const handleRemotePickCard = (card,side) => {
-            const phase = gamePhase;
-            const opponentSide = message.side;
-    
-    setGameState(prev => {
-        const poolKey = opponentSide === 'red' ? 'redInitialPool' : 'blueInitialPool';
-        const playerKey = opponentSide;
-        
-        const newHand = [...prev[playerKey].hand, message.card];
-        const newPool = prev[poolKey].filter(c => c.instanceId !== message.card.instanceId);
-        
-        const isOpponentDone = newHand.length === 3;
-        
-        // 关键：检查自己是否也选完了（通过判断我方的池子是否为空）
-        const mySide = gameManagerRef.current.playerSide;
-        const myPoolKey = mySide === 'red' ? 'redInitialPool' : 'blueInitialPool';
-        const amIDone = prev[myPoolKey].length === 0 && prev[mySide].hand.length >= 3;
-
-        // 如果双方都选完了，切换到 playing 阶段
-        if (isOpponentDone && amIDone) {
-            setTimeout(() => setGamePhase('playing'), 500);
-            return {
-                ...prev,
-                [playerKey]: { ...prev[playerKey], hand: newHand },
-                [poolKey]: [],
-                log: [...prev.log, '双方选牌完成 → 游戏开始！']
-            };
-        }
-
-        return {
-            ...prev,
-            [playerKey]: { ...prev[playerKey], hand: newHand },
-            [poolKey]: isOpponentDone ? [] : newPool
-        };
-    });
-
-            } else if (phase === 'bluePicking') {
-                setGameState(prev => {
-                    const newHand = [...prev.blue.hand, card];
-                    const remaining = prev.initialCards.filter(c => c.instanceId !== card.instanceId);
-                    if (newHand.length === 3) {
-                        setGamePhase('playing');
-                        return {
-                            ...prev,
-                            blue: { ...prev.blue, hand: newHand },
-                            initialCards: [],
-                            deck: window.shuffleArray([...prev.deck, ...remaining]),
-                            log: [...prev.log, '蓝方选牌完成 → 选牌阶段结束']
-                        };
-                    }
-                    return {
-                        ...prev,
-                        blue: { ...prev.blue, hand: newHand },
-                        initialCards: remaining,
-                        log: [...prev.log, `蓝方选择了 ${card.name}`]
-                    };
-                });
-            }
         };
 
         const startTurn = () => {
@@ -1136,87 +1056,81 @@
             );
         }
 
-     if (screen === 'lobby') {
-            return (
-                <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-4">
-                    <h1 className="text-4xl font-bold text-white mb-8">在线对战大厅</h1>
-                    <div className="grid grid-cols-2 gap-4 w-full max-w-md">
-                        {ROOMS.map(id => (
-                            <button key={id} onClick={() => handleJoinRoom(id)} className="bg-gray-800 hover:bg-blue-600 text-white p-6 rounded-xl border-2 border-gray-700 transition-all">
-                                {id.toUpperCase()}
-                            </button>
-                        ))}
-                    </div>
-                </div>
-            );
-        }
+      if (screen === 'game') {
+    if (!window.GameUI) {
+        return <div className="text-white text-center mt-40 text-xl">游戏UI未加载…</div>;
+    }
 
-        if (screen === 'room') {
-            return (
-                <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-4">
-                    <div className="bg-gray-800 p-8 rounded-2xl border-2 border-blue-500 w-full max-w-md">
-                        <h2 className="text-2xl font-bold text-white mb-6 text-center">房间: {currentRoomId?.toUpperCase()}</h2>
-                        <div className="space-y-4 mb-8">
-                            {roomPlayers.map(p => (
-                                <div key={p.playerId} className="flex justify-between items-center bg-gray-700 p-4 rounded-lg">
-                                    <span className="text-white font-mono">{p.playerId.slice(0,8)}... {p.playerId === gameManagerRef.current.playerId ? "(你)" : ""}</span>
-                                    <span className={p.ready ? "text-green-400" : "text-red-400"}>{p.ready ? "已准备" : "未准备"}</span>
-                                </div>
-                            ))}
+    const mySide = gameManagerRef.current?.playerSide;
+
+    // 防止 gameState 为空
+    if (!gameState) return null;
+
+    const displayGameState = {
+        ...gameState,
+        initialCards:
+            mySide === 'red'
+                ? gameState.redInitialPool
+                : gameState.blueInitialPool
+    };
+
+    const opponentOnline = roomPlayers.length === 2;
+
+    return (
+        <window.GameUI
+            gameState={displayGameState}
+            gamePhase={gamePhase}
+            allCards={allCards}
+            winner={winner}
+            battleAnimation={battleAnimation}
+            cardShowOverlay={cardShowOverlay}
+            onStartPicking={() => {}}
+            onPickCard={pickCard}
+            onStartTurn={startTurn}
+            onSelectCard={selectCard}
+            onPlayCard={playCard}
+            onUseCardOnTarget={useCardOnTarget}
+            onConfirmUse={confirmUse}
+            onEndPhase={endPhase}
+            onReset={reset}
+            hideOpponentHand={true}
+            myRole={mySide}
+            extraUI={
+                <div className="fixed top-4 right-4 z-50 bg-gray-800 rounded-lg p-3 shadow-lg border-2 border-purple-500">
+                    <div className="text-white text-sm">
+                        <div className="font-bold mb-1">🌐 在线对战</div>
+                        <div className="text-yellow-400 font-mono text-xs">
+                            房间: {currentRoomId?.toUpperCase()}
                         </div>
-                        <button onClick={toggleReady} className={`w-full py-4 rounded-xl font-bold text-xl transition-all ${gameManagerRef.current.isReady ? 'bg-red-500' : 'bg-green-500'} text-white`}>
-                            {gameManagerRef.current.isReady ? "取消准备" : "准备开始"}
+                        <div
+                            className={`text-xs mt-1 flex items-center gap-1 ${
+                                opponentOnline ? 'text-green-400' : 'text-red-400'
+                            }`}
+                        >
+                            <div
+                                className={`w-2 h-2 rounded-full ${
+                                    opponentOnline
+                                        ? 'bg-green-500 animate-pulse'
+                                        : 'bg-red-500'
+                                }`}
+                            ></div>
+                            {opponentOnline ? '对手在线' : '对手离线'}
+                        </div>
+                        <button
+                            onClick={handleBackToLobby}
+                            className="mt-2 w-full px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition-all"
+                        >
+                            退出游戏
                         </button>
                     </div>
                 </div>
-            );
-        }
+            }
+        />
+    );
+}
 
-        if (screen === 'game') {
-            if (!window.GameUI) return <div className="text-white text-center mt-40 text-xl">游戏UI未加载…</div>;
+        return null; // 确保在组件内部，且是所有 screen 判断之后的兜底返回
+    }; // 这里才是 OnlineGame 组件的结束
 
-            const mySide = gameManagerRef.current?.playerSide;
-            const opponentOnline = roomPlayers.length === 2;
-            const displayGameState = {
-                ...gameState,
-                initialCards: mySide === 'red' ? gameState.redInitialPool : gameState.blueInitialPool
-            };
-
-            return (
-                <window.GameUI
-                    gameState={displayGameState}
-                    gamePhase={gamePhase}
-                    allCards={allCards}
-                    winner={winner}
-                    battleAnimation={battleAnimation}
-                    cardShowOverlay={cardShowOverlay}
-                    onStartPicking={() => {}}
-                    onPickCard={pickCard}
-                    onStartTurn={startTurn}
-                    onSelectCard={selectCard}
-                    onPlayCard={playCard}
-                    onUseCardOnTarget={useCardOnTarget}
-                    onConfirmUse={confirmUse}
-                    onEndPhase={endPhase}
-                    onReset={reset}
-                    hideOpponentHand={true}
-                    myRole={mySide}
-                    extraUI={
-                        <div className="fixed top-4 right-4 z-50 bg-gray-800 rounded-lg p-3 shadow-lg border-2 border-purple-500">
-                            <div className="text-white text-sm">
-                                <div className="font-bold mb-1">🌐 在线对战</div>
-                                <div className="text-yellow-400 font-mono text-xs">房间: {currentRoomId?.toUpperCase()}</div>
-                                <div className={`text-xs mt-1 flex items-center gap-1 ${opponentOnline ? 'text-green-400' : 'text-red-400'}`}>
-                                    <div className={`w-2 h-2 rounded-full ${opponentOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-                                    {opponentOnline ? '对手在线' : '对手离线'}
-                                </div>
-                                <button onClick={() => { setScreen('lobby'); ReconnectManager.clear(); }} className="mt-2 w-full px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition-all">退出</button>
-                            </div>
-                        </div>
-                    }
-                />
-            );
-        }
-        return null;
-    };
-        ReactDOM.render(<OnlineGame />, document.getElementById('root'));
+    ReactDOM.render(<OnlineGame />, document.getElementById('root'));
+    </script>
