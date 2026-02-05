@@ -334,27 +334,28 @@
             };
         }, []);
 
-        useEffect(() => {
-            gameManager.setMessageCallback((message) => {
-                handleNetworkMessage(message);
-            });
+        // 将这个 useEffect 改为只设置一次回调
+useEffect(() => {
+    gameManager.setMessageCallback((message) => {
+        handleNetworkMessage(message);
+    });
 
-            gameManager.setPresenceCallback((event) => {
-                console.log('[Presence处理] action:', event.action, 'uuid:', event.uuid, '我的uuid:', gameManager.playerId);
-                
-                // 修复：正确判断对手连接状态
-                if (event.uuid !== gameManager.playerId) {
-                    if (event.action === 'join' || event.action === 'state-change') {
-                        console.log('[Presence处理] 对手上线');
-                        setOpponentConnected(true);
-                        window.SoundManager.playSound('click');
-                    } else if (event.action === 'leave' || event.action === 'timeout') {
-                        console.log('[Presence处理] 对手离线');
-                        setOpponentConnected(false);
-                        addLog('⚠️ 对手已离开房间');
-                    }
-                }
-            });
+    gameManager.setPresenceCallback((event) => {
+        console.log('[Presence处理] action:', event.action, 'uuid:', event.uuid, '我的uuid:', gameManager.playerId);
+        
+        if (event.uuid !== gameManager.playerId) {
+            if (event.action === 'join' || event.action === 'state-change') {
+                console.log('[Presence处理] 对手上线');
+                setOpponentConnected(true);
+                window.SoundManager.playSound('click');
+            } else if (event.action === 'leave' || event.action === 'timeout') {
+                console.log('[Presence处理] 对手离线');
+                setOpponentConnected(false);
+                addLog('⚠️ 对手已离开房间');
+            }
+        }
+    });
+}, []); // 空依赖数组，只在组件挂载时设置一次
         }, [screen, gameState, gamePhase]);
 
         const handleNetworkMessage = useCallback((message) => {
@@ -383,13 +384,13 @@
                     break;
                 
                 case 'start-game':
-                    console.log('📨 处理 start-game，isHost:', gameManager.isHost);
-                    if (!gameManager.isHost) {
-                        console.log('二号玩家收到 start-game，seed:', message.seed);
+                    console.log('📨 处理 start-game，playerSide:', gameManager.playerSide, 'isHost:', gameManager.isHost);
+                    // 使用 playerSide 判断更可靠
+                    if (gameManager.playerSide === 'blue') {
+                        console.log('蓝方玩家收到 start-game，seed:', message.seed);
                         initializeGame(message.seed);
                     }
                     break;
-
                 case 'pick-card':
                     handleRemotePickCard(message.card);
                     break;
