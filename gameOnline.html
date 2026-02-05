@@ -1112,31 +1112,26 @@
             );
         }
 
-        if (screen === 'game') {
+      if (screen === 'game') {
             if (!window.GameUI) {
                 return <div className="text-white text-center mt-40 text-xl">游戏UI未加载…</div>;
             }
 
-            // 【关键修改】：根据身份过滤数据
-    const mySide = gameManagerRef.current?.playerSide;
-    const displayGameState = {
-        ...gameState,
-        // 如果是在选牌阶段，只给 UI 展示我该看的池子
-        initialCards: mySide === 'red' ? gameState.redInitialPool : gameState.blueInitialPool
-    };
-
-    return (
-        <window.GameUI
-            gameState={displayGameState} // 使用过滤后的状态
-            gamePhase={gamePhase}
-            // ... 其他 props 保持不变 ...
-            myRole={mySide}
-        />
-    );
+            // 1. 获取当前玩家身份和对手状态
+            const mySide = gameManagerRef.current?.playerSide;
             const opponentOnline = roomPlayers.length === 2;
+
+            // 2. 【关键修改】：构造用于显示的 displayGameState
+            // 确保在选牌阶段，UI 只拿到属于当前玩家的那份候选牌池（initialCards）
+            const displayGameState = {
+                ...gameState,
+                initialCards: mySide === 'red' ? gameState.redInitialPool : gameState.blueInitialPool
+            };
+
+            // 3. 统一返回一个完整的 GameUI，包含过滤后的状态和所有的业务回调
             return (
                 <window.GameUI
-                    gameState={gameState}
+                    gameState={displayGameState} // 使用过滤后的显示状态
                     gamePhase={gamePhase}
                     allCards={allCards}
                     winner={winner}
@@ -1152,7 +1147,7 @@
                     onEndPhase={endPhase}
                     onReset={reset}
                     hideOpponentHand={true}
-                    myRole={gameManagerRef.current?.playerSide}
+                    myRole={mySide}
                     extraUI={
                         <div className="fixed top-4 right-4 z-50 bg-gray-800 rounded-lg p-3 shadow-lg border-2 border-purple-500">
                             <div className="text-white text-sm">
@@ -1171,11 +1166,3 @@
                 />
             );
         }
-
-        return null;
-    };
-
-    ReactDOM.render(<OnlineGame />, document.getElementById('root'));
-    </script>
-</body>
-</html>
