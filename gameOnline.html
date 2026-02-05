@@ -441,53 +441,53 @@
             }, 1500);
         };
 
-     const initializeGameWithSeed = (seed) => {
-            if (!allCards || allCards.length === 0) return;
-            const seededRandom = (s) => {
-                const x = Math.sin(s++) * 10000;
-                return x - Math.floor(x);
-            };
-            let currentSeed = seed;
-            const seededShuffle = (arr) => {
-                const a = [...arr];
-                for (let i = a.length - 1; i > 0; i--) {
-                    const j = Math.floor(seededRandom(currentSeed++) * (i + 1));
-                    [a[i], a[j]] = [a[j], a[i]];
-                }
-                return a;
-            };
-            const regular = allCards.filter(c => c.type !== 'miracle');
-            const miracles = allCards.filter(c => c.type === 'miracle');
-            const deck = seededShuffle(regular.map(window.createCard));
-            const miracleDeck = seededShuffle(miracles.map(window.createCard));
-            
-            const redSix = deck.slice(0, 6);
-            const blueSix = deck.slice(6, 12);
-            const rest = deck.slice(12);
-            const mDeck = [...miracleDeck];
-            const redM = mDeck.pop();
-            const blueM = mDeck.pop();
+   const initializeGameWithSeed = (seed) => {
+    if (!allCards || allCards.length === 0) return;
+    const seededRandom = (s) => {
+        const x = Math.sin(s++) * 10000;
+        return x - Math.floor(x);
+    };
+    let currentSeed = seed;
+    const seededShuffle = (arr) => {
+        const a = [...arr];
+        for (let i = a.length - 1; i > 0; i--) {
+            const j = Math.floor(seededRandom(currentSeed++) * (i + 1));
+            [a[i], a[j]] = [a[j], a[i]];
+        }
+        return a;
+    };
+    const regular = allCards.filter(c => c.type !== 'miracle');
+    const miracles = allCards.filter(c => c.type === 'miracle');
+    const deck = seededShuffle(regular.map(window.createCard));
+    const miracleDeck = seededShuffle(miracles.map(window.createCard));
+    
+    const redSix = deck.slice(0, 6);
+    const blueSix = deck.slice(6, 12);
+    const rest = deck.slice(12);
+    const mDeck = [...miracleDeck];
+    const redM = mDeck.pop();
+    const blueM = mDeck.pop();
 
-            setGameState({
-                ...INIT_STATE,
-                red: { ...INIT_STATE.red, hand: redM ? [redM] : [] },
-                blue: { ...INIT_STATE.blue, hand: blueM ? [blueM] : [] },
-                deck: rest,
-                miracleDeck: mDeck,
-                // 【修改点】：确保键名与 UI 渲染时一致
-                redInitialPool: redSix,
-                blueInitialPool: blueSix,
-                log: [
-                    '🌐 在线游戏开始！',
-                    `你是${gameManagerRef.current.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}`,
-                    '双方各抽取1张奇迹牌',
-                    '--- 选牌阶段开始 ---'
-                ]
-            });
-            const mySide = gameManagerRef.current.playerSide;
-            setGamePhase(mySide === 'red' ? 'redPicking' : 'bluePicking');
-            setScreen('game');
-        };
+    setGameState({
+        ...INIT_STATE,
+        red: { ...INIT_STATE.red, hand: redM ? [redM] : [] },
+        blue: { ...INIT_STATE.blue, hand: blueM ? [blueM] : [] },
+        deck: rest,
+        miracleDeck: mDeck,
+        // 【修改】：使用正确的键名
+        initialCards: redSix,
+        initialCardsBlue: blueSix,
+        log: [
+            '🌐 在线游戏开始！',
+            `你是${gameManagerRef.current.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}`,
+            '双方各抽取1张奇迹牌',
+            '--- 选牌阶段开始 ---'
+        ]
+    });
+    const mySide = gameManagerRef.current.playerSide;
+    setGamePhase(mySide === 'red' ? 'redPicking' : 'bluePicking');
+    setScreen('game');
+};
 
         // 游戏操作函数（简化版，保留核心逻辑）
        const pickCard = (card) => {
@@ -1079,8 +1079,8 @@
         ...gameState,
         initialCards:
             mySide === 'red'
-                ? gameState.redInitialPool
-                : gameState.blueInitialPool
+                  ? gameState.initialCards      // 红方用 initialCards
+            : gameState.initialCardsBlue  // 蓝方用 initialCardsBlue
     };
 
     const opponentOnline = roomPlayers.length === 2;
