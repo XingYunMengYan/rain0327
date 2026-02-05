@@ -11,7 +11,6 @@
     <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
     <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.7.4.0.js"></script>
     <script src="shared.js"></script>
-    <script src="cardEffects.js"></script>
 </head>
 <body>
     <div id="root"></div>
@@ -19,118 +18,74 @@
     <script type="text/babel">
     const { useState, useEffect, useCallback, useRef } = React;
 
-    // ══════════════════════════════════════════════════════════
-    // PubNub 配置
-    // ══════════════════════════════════════════════════════════
     const PUBNUB_CONFIG = {
-        publishKey: 'pub-c-f4e44d70-cc7d-4f6b-a8f3-cf3a93b39a0a',
-        subscribeKey: 'sub-c-c4597e4a-cee9-4265-b2d7-136bb547facb',
+        publishKey: 'demo',
+        subscribeKey: 'demo',
     };
 
-    // ══════════════════════════════════════════════════════════
-    // 断线重连 - LocalStorage 管理
-    // ══════════════════════════════════════════════════════════
+    const ROOMS = ['room1', 'room2', 'room3', 'room4', 'room5', 'room6'];
+
     const ReconnectManager = {
         STORAGE_KEY: 'cardgame_online_session',
-        
         saveSession(data) {
             try {
                 localStorage.setItem(this.STORAGE_KEY, JSON.stringify({
                     ...data,
                     timestamp: Date.now()
                 }));
-            } catch (e) {
-                console.error('[ReconnectManager] 保存失败:', e);
-            }
+            } catch (e) {}
         },
-        
         loadSession() {
             try {
                 const data = localStorage.getItem(this.STORAGE_KEY);
                 if (!data) return null;
-                
                 const session = JSON.parse(data);
                 const age = Date.now() - session.timestamp;
-                
                 if (age > 30 * 60 * 1000) {
                     this.clearSession();
                     return null;
                 }
-                
                 return session;
             } catch (e) {
-                console.error('[ReconnectManager] 加载失败:', e);
                 return null;
             }
         },
-        
         clearSession() {
             localStorage.removeItem(this.STORAGE_KEY);
         }
     };
 
-    // ══════════════════════════════════════════════════════════
-    // 在线游戏管理器
-    // ══════════════════════════════════════════════════════════
     class OnlineGameManager {
         constructor() {
             this.pubnub = null;
             this.roomId = null;
             this.playerId = null;
             this.playerSide = null;
-            this.isHost = false;
+            this.isReady = false;
             this.onMessageCallback = null;
             this.onPresenceCallback = null;
-            this.heartbeatInterval = null;
         }
 
         init(existingPlayerId = null) {
-            this.playerId = existingPlayerId || 'player_' + Math.random().toString(36).substr(2, 9);
+            this.playerId = existingPlayerId || 'p_' + Math.random().toString(36).substr(2, 9);
             this.pubnub = new PubNub({
                 ...PUBNUB_CONFIG,
                 uuid: this.playerId,
                 heartbeatInterval: 10
             });
-            console.log('[GameManager] 初始化 playerId:', this.playerId);
-        }
-
-        createRoom() {
-            this.roomId = this.generateRoomId();
-            this.isHost = true;
-            this.playerSide = 'red';
-            this.subscribeToRoom();
-            this.startHeartbeat();
-            return this.roomId;
         }
 
         joinRoom(roomId) {
             this.roomId = roomId;
-            this.isHost = false;
-            this.playerSide = 'blue';
             this.subscribeToRoom();
-            this.startHeartbeat();
-            this.sendMessage({ type: 'player-joined', playerId: this.playerId });
-        }
-
-        rejoinRoom(roomId, isHost, playerSide) {
-            this.roomId = roomId;
-            this.isHost = isHost;
-            this.playerSide = playerSide;
-            this.subscribeToRoom();
-            this.startHeartbeat();
-            this.sendMessage({ 
-                type: 'player-rejoined', 
-                playerId: this.playerId,
-                playerSide: this.playerSide
-            });
+            this.sendMessage({ type: 'player-join', playerId: this.playerId });
         }
 
         subscribeToRoom() {
             if (!this.pubnub || !this.roomId) return;
-
             this.pubnub.addListener({
                 message: (event) => {
-                    if (event.message.senderId !== this.playerId && this.onMessageCallback) {
+                    if (this.onMessageCallback) {
                         this.onMessageCallback(event.message);
                     }
                 },
@@ -140,7 +95,6 @@
                     }
                 }
             });
-
             this.pubnub.subscribe({
                 channels: [this.roomId],
                 withPresence: true
@@ -149,7 +103,6 @@
 
         sendMessage(message) {
             if (!this.pubnub || !this.roomId) return;
-            
             this.pubnub.publish({
                 channel: this.roomId,
                 message: {
@@ -160,26 +113,23 @@
             });
         }
 
-        startHeartbeat() {
-            this.heartbeatInterval = setInterval(() => {
-                this.sendMessage({ type: 'heartbeat' });
-            }, 30000);
+        setReady(ready) {
+            this.isReady = ready;
+            this.sendMessage({ 
+                type: 'player-ready', 
+                playerId: this.playerId,
+                ready: ready
+            });
         }
 
         leaveRoom() {
-            if (this.heartbeatInterval) {
-                clearInterval(this.heartbeatInterval);
-            }
             if (this.pubnub && this.roomId) {
-                this.sendMessage({ type: 'player-left' });
-                this.pubnub.unsubscribe({
-                    channels: [this.roomId]
-                });
+                this.sendMessage({ type: 'player-leave', playerId: this.playerId });
+                this.pubnub.unsubscribe({ channels: [this.roomId] });
             }
-        }
-
-        generateRoomId() {
-            return Math.random().toString(36).substr(2, 6).toUpperCase();
+            this.roomId = null;
+            this.playerSide = null;
+            this.isReady = false;
         }
 
         setMessageCallback(callback) {
@@ -191,9 +141,6 @@
         }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // 主应用组件
-    // ══════════════════════════════════════════════════════════
     const OnlineGame = () => {
         const [uiReady, setUiReady] = useState(false);
         const [allCards, setAllCards] = useState([]);
@@ -217,14 +164,14 @@
             deck: [], miracleDeck: [], discardPile: [], initialCards: [], initialCardsBlue: [], selectedCard: null, log: []
         };
 
-        const [screen, setScreen] = useState('menu');
-        const [roomId, setRoomId] = useState('');
-        const [roomInput, setRoomInput] = useState('');
+        const [screen, setScreen] = useState('lobby');
+        const [currentRoomId, setCurrentRoomId] = useState(null);
         const gameManagerRef = useRef(null);
-        const [opponentConnected, setOpponentConnected] = useState(false);
+        const [roomPlayers, setRoomPlayers] = useState([]);
         const [showReconnectPrompt, setShowReconnectPrompt] = useState(false);
         const [reconnectData, setReconnectData] = useState(null);
-
+        const [showRoulette, setShowRoulette] = useState(false);
+        const [rouletteResult, setRouletteResult] = useState(null);
         const [gameState, setGameState] = useState(INIT_STATE);
         const gameStateRef = useRef(gameState);
         const [gamePhase, setGamePhase] = useState('notStarted');
@@ -233,14 +180,16 @@
         const [cardShowOverlay, setCardShowOverlay] = useState(null);
 
         useEffect(() => {
+            gameStateRef.current = gameState;
+        }, [gameState]);
+
+        useEffect(() => {
             gameManagerRef.current = new OnlineGameManager();
-            
             const session = ReconnectManager.loadSession();
             if (session && session.roomId) {
                 setReconnectData(session);
                 setShowReconnectPrompt(true);
             }
-            
             return () => {
                 if (gameManagerRef.current) {
                     gameManagerRef.current.leaveRoom();
@@ -249,33 +198,17 @@
         }, []);
 
         useEffect(() => {
-            gameStateRef.current = gameState;
-        }, [gameState]);
-
-        const handleReconnect = () => {
-            if (!reconnectData) return;
-            
-            gameManagerRef.current.init(reconnectData.playerId);
-            gameManagerRef.current.rejoinRoom(
-                reconnectData.roomId,
-                reconnectData.isHost,
-                reconnectData.playerSide
-            );
-            
-            setRoomId(reconnectData.roomId);
-            setGameState(reconnectData.gameState || INIT_STATE);
-            setGamePhase(reconnectData.gamePhase || 'notStarted');
-            
-            setScreen(reconnectData.gamePhase === 'notStarted' ? 'lobby' : 'game');
-            setShowReconnectPrompt(false);
-            window.SoundManager.playSound('click');
-        };
-
-        const handleNewGame = () => {
-            ReconnectManager.clearSession();
-            setShowReconnectPrompt(false);
-            window.SoundManager.playSound('click');
-        };
+            if (screen === 'game' && gameManagerRef.current) {
+                ReconnectManager.saveSession({
+                    roomId: currentRoomId,
+                    playerId: gameManagerRef.current.playerId,
+                    playerSide: gameManagerRef.current.playerSide,
+                    gameState,
+                    gamePhase,
+                    screen
+                });
+            }
+        }, [gameState, gamePhase, screen, currentRoomId]);
 
         const addLog = useCallback((msg) => { 
             setGameState(prev => ({ ...prev, log: [...prev.log, msg] })); 
@@ -288,115 +221,120 @@
             setTimeout(() => setCardShowOverlay(null), dur);
         }, []);
 
-        useEffect(() => {
-            if ((screen === 'game' || screen === 'lobby') && gameManagerRef.current) {
-                ReconnectManager.saveSession({
-                    roomId,
-                    playerId: gameManagerRef.current.playerId,
-                    playerSide: gameManagerRef.current.playerSide,
-                    isHost: gameManagerRef.current.isHost,
-                    gameState,
-                    gamePhase,
-                    screen
-                });
-            }
-        }, [gameState, gamePhase, screen, roomId]);
+        const handleReconnect = () => {
+            if (!reconnectData) return;
+            gameManagerRef.current.init(reconnectData.playerId);
+            gameManagerRef.current.playerSide = reconnectData.playerSide;
+            gameManagerRef.current.joinRoom(reconnectData.roomId);
+            setCurrentRoomId(reconnectData.roomId);
+            setGameState(reconnectData.gameState || INIT_STATE);
+            setGamePhase(reconnectData.gamePhase || 'notStarted');
+            setScreen('game');
+            setShowReconnectPrompt(false);
+            gameManagerRef.current.sendMessage({ 
+                type: 'player-reconnect',
+                playerSide: reconnectData.playerSide
+            });
+            window.SoundManager.playSound('click');
+        };
+
+        const handleNewGame = () => {
+            ReconnectManager.clearSession();
+            setShowReconnectPrompt(false);
+            window.SoundManager.playSound('click');
+        };
 
         const handleNetworkMessage = useCallback((message) => {
             switch (message.type) {
-                case 'player-joined':
-                case 'player-rejoined':
-                    setOpponentConnected(true);
+                case 'player-join':
+                    setRoomPlayers(prev => {
+                        if (prev.find(p => p.playerId === message.playerId)) return prev;
+                        return [...prev, { playerId: message.playerId, ready: false }];
+                    });
                     window.SoundManager.playSound('click');
-                    if (message.type === 'player-rejoined') {
-                        addLog('对手已重新连接');
+                    break;
+                case 'player-ready':
+                    setRoomPlayers(prev => 
+                        prev.map(p => 
+                            p.playerId === message.playerId 
+                                ? { ...p, ready: message.ready } 
+                                : p
+                        )
+                    );
+                    break;
+                case 'player-leave':
+                    setRoomPlayers(prev => prev.filter(p => p.playerId !== message.playerId));
+                    if (screen === 'game') addLog('⚠️ 对手已离开房间');
+                    break;
+                case 'start-roulette':
+                    if (message.senderId !== gameManagerRef.current.playerId) {
+                        startRouletteAnimation(message.seed);
                     }
                     break;
-                
-                case 'player-left':
-                    setOpponentConnected(false);
-                    addLog('⚠️ 对手已离开房间');
+                case 'roulette-result':
+                    if (message.senderId !== gameManagerRef.current.playerId) {
+                        applyRouletteResult(message.result);
+                    }
                     break;
-                
-                case 'heartbeat':
-                    setOpponentConnected(true);
-                    break;
-                
                 case 'start-game':
-                    if (gameManagerRef.current?.playerSide === 'blue') {
+                    if (message.senderId !== gameManagerRef.current.playerId) {
                         initializeGameWithSeed(message.seed);
                     }
                     break;
-
+                case 'player-reconnect':
+                    addLog(`${message.playerSide === 'red' ? '红方' : '蓝方'}已重新连接`);
+                    break;
                 case 'pick-card': handleRemotePickCard(message.card); break;
                 case 'play-card': handleRemotePlayCard(message.card, message.laneIndex); break;
                 case 'use-support': handleRemoteUseSupport(message.card, message.targetPlayer, message.laneIndex); break;
                 case 'confirm-use': handleRemoteConfirmUse(message.card); break;
                 case 'end-phase': handleRemoteEndPhase(); break;
                 case 'start-turn': handleRemoteStartTurn(); break;
-                case 'sync-state':
-                    if (message.gameState && message.gamePhase) {
-                        setGameState(message.gameState);
-                        setGamePhase(message.gamePhase);
-                        if (message.winner) setWinner(message.winner);
-                    }
-                    break;
             }
-        }, [addLog]);
+        }, [screen, addLog]);
 
         useEffect(() => {
             if (!gameManagerRef.current) return;
-
-            gameManagerRef.current.setMessageCallback((message) => {
-                handleNetworkMessage(message);
-            });
-
+            gameManagerRef.current.setMessageCallback(handleNetworkMessage);
             gameManagerRef.current.setPresenceCallback((event) => {
-                if (event.uuid !== gameManagerRef.current.playerId) {
-                    if (event.action === 'join' || event.action === 'state-change') {
-                        setOpponentConnected(true);
-                        window.SoundManager.playSound('click');
-                    } else if (event.action === 'leave' || event.action === 'timeout') {
-                        setOpponentConnected(false);
-                        addLog('⚠️ 对手已离开房间');
+                if (event.action === 'timeout' || event.action === 'leave') {
+                    if (event.uuid !== gameManagerRef.current.playerId) {
+                        setRoomPlayers(prev => prev.filter(p => p.playerId !== event.uuid));
+                        if (screen === 'game') addLog('⚠️ 对手断线');
                     }
                 }
             });
-        }, [handleNetworkMessage, addLog]);
+        }, [handleNetworkMessage, screen, addLog]);
 
-        const handleCreateRoom = () => {
+        const handleJoinRoom = (roomId) => {
             if (!gameManagerRef.current.pubnub) {
                 gameManagerRef.current.init();
             }
-            const newRoomId = gameManagerRef.current.createRoom();
-            setRoomId(newRoomId);
-            setScreen('lobby');
+            gameManagerRef.current.joinRoom(roomId);
+            setCurrentRoomId(roomId);
+            setScreen('room');
+            setRoomPlayers([{ playerId: gameManagerRef.current.playerId, ready: false }]);
             window.SoundManager.playSound('click');
         };
 
-        const handleJoinRoom = () => {
-            if (!roomInput.trim()) {
-                alert('请输入房间号！');
-                return;
-            }
-            if (!gameManagerRef.current.pubnub) {
-                gameManagerRef.current.init();
-            }
-            gameManagerRef.current.joinRoom(roomInput.toUpperCase());
-            setRoomId(roomInput.toUpperCase());
-            setScreen('lobby');
+        const handleToggleReady = () => {
+            const newReady = !gameManagerRef.current.isReady;
+            gameManagerRef.current.setReady(newReady);
+            setRoomPlayers(prev => 
+                prev.map(p => 
+                    p.playerId === gameManagerRef.current.playerId 
+                        ? { ...p, ready: newReady } 
+                        : p
+                )
+            );
             window.SoundManager.playSound('click');
         };
 
-        const handleStartGame = () => {
-            if (!opponentConnected) {
-                alert('等待对手加入房间！');
-                return;
-            }
-            
-            const seed = Date.now();
-            gameManagerRef.current.sendMessage({ type: 'start-game', seed });
-            initializeGameWithSeed(seed);
+        const handleLeaveRoom = () => {
+            gameManagerRef.current.leaveRoom();
+            setCurrentRoomId(null);
+            setRoomPlayers([]);
+            setScreen('lobby');
             window.SoundManager.playSound('click');
         };
 
@@ -404,24 +342,63 @@
             if (confirm('确定要离开游戏吗？进度将会丢失。')) {
                 gameManagerRef.current.leaveRoom();
                 ReconnectManager.clearSession();
-                setScreen('menu');
-                setRoomId('');
-                setOpponentConnected(false);
+                setCurrentRoomId(null);
+                setRoomPlayers([]);
                 setGameState(INIT_STATE);
                 setGamePhase('notStarted');
                 setWinner(null);
+                setScreen('lobby');
                 window.SoundManager.playSound('click');
             }
         };
 
+        const canStartGame = roomPlayers.length === 2 && roomPlayers.every(p => p.ready);
+
+        useEffect(() => {
+            if (screen === 'room' && canStartGame) {
+                const seed = Date.now();
+                gameManagerRef.current.sendMessage({ type: 'start-roulette', seed });
+                startRouletteAnimation(seed);
+            }
+        }, [canStartGame, screen]);
+
+        const startRouletteAnimation = (seed) => {
+            setShowRoulette(true);
+            setScreen('roulette');
+            window.SoundManager.playSound('spin');
+            setTimeout(() => {
+                const seededRandom = Math.sin(seed) * 10000;
+                const randomValue = seededRandom - Math.floor(seededRandom);
+                const players = [...roomPlayers].sort((a, b) => a.playerId.localeCompare(b.playerId));
+                const result = randomValue > 0.5 ? 
+                    { [players[0].playerId]: 'red', [players[1].playerId]: 'blue' } :
+                    { [players[0].playerId]: 'blue', [players[1].playerId]: 'red' };
+                gameManagerRef.current.sendMessage({ type: 'roulette-result', result });
+                applyRouletteResult(result);
+            }, 2000);
+        };
+
+        const applyRouletteResult = (result) => {
+            const mySide = result[gameManagerRef.current.playerId];
+            gameManagerRef.current.playerSide = mySide;
+            setRouletteResult(mySide);
+            addLog(`抽签结果：你是${mySide === 'red' ? '红方🔴' : '蓝方🔵'}`);
+            setTimeout(() => {
+                setShowRoulette(false);
+                if (mySide === 'red') {
+                    const gameSeed = Date.now();
+                    gameManagerRef.current.sendMessage({ type: 'start-game', seed: gameSeed });
+                    initializeGameWithSeed(gameSeed);
+                }
+            }, 1500);
+        };
+
         const initializeGameWithSeed = (seed) => {
             if (!allCards || allCards.length === 0) return;
-
             const seededRandom = (s) => {
                 const x = Math.sin(s++) * 10000;
                 return x - Math.floor(x);
             };
-
             let currentSeed = seed;
             const seededShuffle = (arr) => {
                 const a = [...arr];
@@ -431,20 +408,16 @@
                 }
                 return a;
             };
-
             const regular = allCards.filter(c => c.type !== 'miracle');
             const miracles = allCards.filter(c => c.type === 'miracle');
             const deck = seededShuffle(regular.map(window.createCard));
             const miracleDeck = seededShuffle(miracles.map(window.createCard));
-
             const redSix = deck.slice(0, 6);
             const blueSix = deck.slice(6, 12);
             const rest = deck.slice(12);
-
             const mDeck = [...miracleDeck];
             const redM = mDeck.pop();
             const blueM = mDeck.pop();
-
             setGameState({
                 ...INIT_STATE,
                 red: { ...INIT_STATE.red, hand: redM ? [redM] : [] },
@@ -464,15 +437,14 @@
             setScreen('game');
         };
 
+        // 游戏操作函数（简化版，保留核心逻辑）
         const pickCard = (card) => {
             const phase = gamePhase;
             const isMyTurn = (phase === 'redPicking' && gameManagerRef.current.playerSide === 'red') || 
                             (phase === 'bluePicking' && gameManagerRef.current.playerSide === 'blue');
             if (!isMyTurn) return;
-
             window.SoundManager.playSound('click');
             gameManagerRef.current.sendMessage({ type: 'pick-card', card });
-
             if (phase === 'redPicking') {
                 setGameState(prev => {
                     const newHand = [...prev.red.hand, card];
@@ -486,14 +458,13 @@
                             deck: window.shuffleArray([...prev.deck, ...remaining]),
                             log: [...prev.log, '红方选牌完成']
                         };
-                    } else {
-                        return {
-                            ...prev,
-                            red: { ...prev.red, hand: newHand },
-                            initialCards: remaining,
-                            log: [...prev.log, `红方选择了 ${card.name}`]
-                        };
                     }
+                    return {
+                        ...prev,
+                        red: { ...prev.red, hand: newHand },
+                        initialCards: remaining,
+                        log: [...prev.log, `红方选择了 ${card.name}`]
+                    };
                 });
             } else if (phase === 'bluePicking') {
                 setGameState(prev => {
@@ -508,14 +479,13 @@
                             deck: window.shuffleArray([...prev.deck, ...remaining]),
                             log: [...prev.log, '蓝方选牌完成 → 选牌阶段结束']
                         };
-                    } else {
-                        return {
-                            ...prev,
-                            blue: { ...prev.blue, hand: newHand },
-                            initialCards: remaining,
-                            log: [...prev.log, `蓝方选择了 ${card.name}`]
-                        };
                     }
+                    return {
+                        ...prev,
+                        blue: { ...prev.blue, hand: newHand },
+                        initialCards: remaining,
+                        log: [...prev.log, `蓝方选择了 ${card.name}`]
+                    };
                 });
             }
         };
@@ -526,7 +496,6 @@
             const isOpponentTurn = (phase === 'redPicking' && opponentSide === 'red') || 
                                   (phase === 'bluePicking' && opponentSide === 'blue');
             if (!isOpponentTurn) return;
-
             if (phase === 'redPicking') {
                 setGameState(prev => {
                     const newHand = [...prev.red.hand, card];
@@ -540,14 +509,13 @@
                             deck: window.shuffleArray([...prev.deck, ...remaining]),
                             log: [...prev.log, '红方选牌完成']
                         };
-                    } else {
-                        return {
-                            ...prev,
-                            red: { ...prev.red, hand: newHand },
-                            initialCards: remaining,
-                            log: [...prev.log, `红方选择了 ${card.name}`]
-                        };
                     }
+                    return {
+                        ...prev,
+                        red: { ...prev.red, hand: newHand },
+                        initialCards: remaining,
+                        log: [...prev.log, `红方选择了 ${card.name}`]
+                    };
                 });
             } else if (phase === 'bluePicking') {
                 setGameState(prev => {
@@ -562,14 +530,13 @@
                             deck: window.shuffleArray([...prev.deck, ...remaining]),
                             log: [...prev.log, '蓝方选牌完成 → 选牌阶段结束']
                         };
-                    } else {
-                        return {
-                            ...prev,
-                            blue: { ...prev.blue, hand: newHand },
-                            initialCards: remaining,
-                            log: [...prev.log, `蓝方选择了 ${card.name}`]
-                        };
                     }
+                    return {
+                        ...prev,
+                        blue: { ...prev.blue, hand: newHand },
+                        initialCards: remaining,
+                        log: [...prev.log, `蓝方选择了 ${card.name}`]
+                    };
                 });
             }
         };
@@ -580,20 +547,16 @@
             doStartTurn();
         };
 
-        const handleRemoteStartTurn = () => {
-            doStartTurn();
-        };
+        const handleRemoteStartTurn = () => { doStartTurn(); };
 
         const doStartTurn = () => {
             setGameState(prev => {
                 const newTurn = prev.turn + 1;
                 const coins = Math.min(newTurn, 10);
                 const logs = [`--- 第${newTurn}回合开始 ---`, `双方获得 ${coins} 金币`];
-                
                 let deck = [...prev.deck];
                 let redHand = [...prev.red.hand];
                 let blueHand = [...prev.blue.hand];
-
                 if (newTurn >= 2) {
                     for (let i = 0; i < 2; i++) {
                         const r = deck.pop();
@@ -605,7 +568,6 @@
                 } else {
                     logs.push('第一回合不抽牌');
                 }
-
                 return {
                     ...prev,
                     turn: newTurn,
@@ -623,7 +585,6 @@
             if (player !== gameManagerRef.current.playerSide || phase === 'idle' || phase === 'battle') return;
             const isRedPhase = phase === 'redDeploy' || phase === 'redSupport';
             if ((isRedPhase && player !== 'red') || (!isRedPhase && player !== 'blue')) return;
-            
             setGameState(prev => {
                 if (prev.selectedCard?.instanceId === card.instanceId) {
                     return { ...prev, selectedCard: null };
@@ -636,11 +597,9 @@
             const state = gameStateRef.current;
             const card = state.selectedCard;
             if (!card || card.type !== 'battlefield') return;
-            
             const phase = state.phase;
             const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
             if (player !== gameManagerRef.current.playerSide) return;
-
             const playerState = state[player];
             if (playerState.coins < card.cost) {
                 addLog('金币不足！');
@@ -650,10 +609,8 @@
                 addLog('该路线已有卡牌！');
                 return;
             }
-
             window.SoundManager.playSound('place');
             gameManagerRef.current.sendMessage({ type: 'play-card', card, laneIndex });
-
             setGameState(prev => {
                 const bf = [...prev[player].battlefield];
                 bf[laneIndex] = { ...card };
@@ -676,7 +633,6 @@
             const phase = state.phase;
             const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
             if (player === gameManagerRef.current.playerSide) return;
-
             setGameState(prev => {
                 const bf = [...prev[player].battlefield];
                 bf[laneIndex] = { ...card };
@@ -697,35 +653,33 @@
             const state = gameStateRef.current;
             const card = state.selectedCard;
             if (!card || (card.type !== 'support' && card.type !== 'miracle')) return;
-            
             const phase = state.phase;
             const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
             if (player !== gameManagerRef.current.playerSide) return;
-
             const playerState = state[player];
             const target = state[targetPlayer].battlefield[laneIndex];
-            
-            const needsTarget = window.EffectEngine?.needsTarget(card.id) || false;
-            if (needsTarget && !target) {
+            if (!target) {
                 addLog('目标位置没有单位！');
                 return;
             }
-
             const cost = card.type === 'miracle' ? 0 : card.cost;
             if (playerState.coins < cost) {
                 addLog('金币不足！');
                 return;
             }
-
-            gameManagerRef.current.sendMessage({ 
-                type: 'use-support', 
-                card, 
-                targetPlayer, 
-                laneIndex,
-                needsTarget 
-            });
-
-            applyCardEffect(card, player, target);
+            addLog(`${player === 'red' ? '红方' : '蓝方'}对 ${target.name} 使用了 ${card.name}`);
+            showCardOverlay(card);
+            gameManagerRef.current.sendMessage({ type: 'use-support', card, targetPlayer, laneIndex });
+            setGameState(prev => ({
+                ...prev,
+                [player]: {
+                    ...playerState,
+                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
+                    coins: playerState.coins - cost
+                },
+                discardPile: [...prev.discardPile, card],
+                selectedCard: null
+            }));
         };
 
         const handleRemoteUseSupport = (card, targetPlayer, laneIndex) => {
@@ -733,30 +687,47 @@
             const phase = state.phase;
             const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
             if (player === gameManagerRef.current.playerSide) return;
-
-            const needsTarget = window.EffectEngine?.needsTarget(card.id) || false;
-            const target = needsTarget ? state[targetPlayer].battlefield[laneIndex] : null;
-            applyCardEffect(card, player, target);
+            const playerState = state[player];
+            const target = state[targetPlayer].battlefield[laneIndex];
+            addLog(`${player === 'red' ? '红方' : '蓝方'}对 ${target?.name || '目标'} 使用了 ${card.name}`);
+            showCardOverlay(card);
+            setGameState(prev => ({
+                ...prev,
+                [player]: {
+                    ...playerState,
+                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
+                    coins: playerState.coins - (card.type === 'miracle' ? 0 : card.cost)
+                },
+                discardPile: [...prev.discardPile, card]
+            }));
         };
 
         const confirmUse = () => {
             const state = gameStateRef.current;
             const card = state.selectedCard;
             if (!card) return;
-            
             const phase = state.phase;
             const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
             if (player !== gameManagerRef.current.playerSide) return;
-
             const playerState = state[player];
             const cost = card.type === 'miracle' ? 0 : card.cost;
             if (playerState.coins < cost) {
                 addLog('金币不足！');
                 return;
             }
-
+            addLog(`${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`);
+            showCardOverlay(card);
             gameManagerRef.current.sendMessage({ type: 'confirm-use', card });
-            applyCardEffect(card, player, null);
+            setGameState(prev => ({
+                ...prev,
+                [player]: {
+                    ...playerState,
+                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
+                    coins: playerState.coins - cost
+                },
+                discardPile: [...prev.discardPile, card],
+                selectedCard: null
+            }));
         };
 
         const handleRemoteConfirmUse = (card) => {
@@ -764,69 +735,29 @@
             const phase = state.phase;
             const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
             if (player === gameManagerRef.current.playerSide) return;
-
-            applyCardEffect(card, player, null);
-        };
-
-        const applyCardEffect = (card, player, target) => {
-            const cost = card.type === 'miracle' ? 0 : card.cost;
+            const playerState = state[player];
+            addLog(`${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`);
             showCardOverlay(card);
-
-            setGameState(prev => {
-                let newState = {
-                    ...prev,
-                    [player]: {
-                        ...prev[player],
-                        hand: prev[player].hand.filter(c => c.instanceId !== card.instanceId),
-                        coins: prev[player].coins - cost
-                    },
-                    discardPile: [...prev.discardPile, card]
-                };
-
-                if (window.EffectEngine) {
-                    try {
-                        const context = {
-                            player: player,
-                            card: card,
-                            target: target,
-                            logCallback: (msg) => {
-                                newState.log = [...newState.log, msg];
-                            }
-                        };
-
-                        const resultState = window.EffectEngine.trigger(card.id, context, newState);
-                        
-                        return {
-                            ...resultState,
-                            selectedCard: null
-                        };
-                    } catch (error) {
-                        console.error('[applyCardEffect] 效果执行失败:', error);
-                        newState.log = [...newState.log, `${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`];
-                    }
-                } else {
-                    newState.log = [...newState.log, `${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`];
-                }
-
-                return {
-                    ...newState,
-                    selectedCard: null
-                };
-            });
+            setGameState(prev => ({
+                ...prev,
+                [player]: {
+                    ...playerState,
+                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
+                    coins: playerState.coins - (card.type === 'miracle' ? 0 : card.cost)
+                },
+                discardPile: [...prev.discardPile, card]
+            }));
         };
 
         const endPhase = () => {
             const phase = gameStateRef.current.phase;
             const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
             if (player !== gameManagerRef.current.playerSide) return;
-
             gameManagerRef.current.sendMessage({ type: 'end-phase' });
             doEndPhase();
         };
 
-        const handleRemoteEndPhase = () => {
-            doEndPhase();
-        };
+        const handleRemoteEndPhase = () => { doEndPhase(); };
 
         const doEndPhase = () => {
             const phase = gameStateRef.current.phase;
@@ -836,7 +767,6 @@
                 redSupport: 'battle'
             };
             const target = next[phase];
-
             if (target === 'battle') {
                 setGameState(prev => ({
                     ...prev,
@@ -867,20 +797,16 @@
             let blueHP = state.blue.health;
             let discard = [...state.discardPile];
             let logs = [];
-
             for (let i = 0; i < 4; i++) {
                 setBattleAnimation({ active: true, lane: i });
                 window.SoundManager.playSound('attack');
                 await new Promise(r => setTimeout(r, 1000));
-
                 const rc = redBF[i];
                 const bc = blueBF[i];
-
                 if (rc && bc) {
                     rc.hp -= bc.atk;
                     bc.hp -= rc.atk;
                     logs.push(`路线${i+1}: ${rc.name}(${rc.hp}HP) VS ${bc.name}(${bc.hp}HP)`);
-                    
                     if (rc.hp <= 0) {
                         discard.push(rc);
                         redBF[i] = null;
@@ -899,15 +825,12 @@
                     logs.push(`路线${i+1}: ${bc.name} 攻击红方，造成 ${bc.atk} 伤害`);
                 }
             }
-
             setBattleAnimation({ active: false, lane: -1 });
-
             let newMDeck = [...state.miracleDeck];
             let redHand = [...state.red.hand];
             let blueHand = [...state.blue.hand];
             let redDrawn = [...state.red.miracleDrawn];
             let blueDrawn = [...state.blue.miracleDrawn];
-
             const milestones = [25, 20, 15, 10, 5];
             const drawMiracle = (hp, drawn, hand) => {
                 const hit = milestones.some(m => hp <= m && !drawn.includes(m));
@@ -922,7 +845,6 @@
                 }
                 return { drawn, drewName: null };
             };
-
             if (redHP < state.red.health) {
                 const res = drawMiracle(redHP, redDrawn, redHand);
                 redDrawn = res.drawn;
@@ -933,7 +855,6 @@
                 blueDrawn = res.drawn;
                 if (res.drewName) logs.push(`蓝方血量降至 ${blueHP}，抽取奇迹牌：${res.drewName}`);
             }
-
             if (redHP <= 0 || blueHP <= 0) {
                 const w = redHP > blueHP ? '红方' : (blueHP > redHP ? '蓝方' : '平局');
                 logs.push(`🎉 ${w === '平局' ? '平局' : w + '获胜！'}`);
@@ -942,7 +863,6 @@
             } else {
                 logs.push('战斗结算完成');
             }
-
             setGameState(prev => ({
                 ...prev,
                 phase: 'idle',
@@ -964,7 +884,6 @@
                 discardPile: discard,
                 log: [...prev.log, ...logs]
             }));
-
             setTimeout(() => {
                 const currentState = gameStateRef.current;
                 if (currentState.deck.length === 0 && currentState.red.hand.length === 0 && currentState.blue.hand.length === 0 && !winner) {
@@ -984,7 +903,9 @@
             setGamePhase('notStarted');
             setBattleAnimation({ active: false, lane: -1 });
             setGameState(INIT_STATE);
-            setScreen('lobby');
+            gameManagerRef.current.isReady = false;
+            setRoomPlayers(prev => prev.map(p => ({ ...p, ready: false })));
+            setScreen('room');
         };
 
         if (!uiReady) {
@@ -1000,99 +921,22 @@
                             <h2 className="text-3xl font-bold text-white mb-2">检测到断线</h2>
                             <p className="text-gray-300">发现未完成的游戏</p>
                         </div>
-
                         <div className="bg-gray-700 rounded-xl p-4 mb-6">
-                            <div className="text-sm text-gray-300 mb-2">房间号</div>
-                            <div className="text-2xl font-bold text-yellow-400 font-mono tracking-wider">
+                            <div className="text-sm text-gray-300 mb-2">房间</div>
+                            <div className="text-2xl font-bold text-yellow-400 font-mono">
                                 {reconnectData?.roomId}
                             </div>
                             <div className="text-sm text-gray-400 mt-2">
                                 身份: {reconnectData?.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}
                             </div>
                         </div>
-
                         <div className="grid gap-3">
-                            <button
-                                onClick={handleReconnect}
-                                className="w-full py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold text-lg transition-all duration-200"
-                            >
+                            <button onClick={handleReconnect} className="w-full py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold text-lg transition-all">
                                 重新连接
                             </button>
-                            <button
-                                onClick={handleNewGame}
-                                className="w-full py-4 bg-gray-600 hover:bg-gray-700 text-white rounded-xl font-bold text-lg transition-all duration-200"
-                            >
+                            <button onClick={handleNewGame} className="w-full py-4 bg-gray-600 hover:bg-gray-700 text-white rounded-xl font-bold text-lg transition-all">
                                 开始新游戏
                             </button>
-                        </div>
-
-                        <div className="mt-4 text-center text-xs text-gray-500">
-                            重连后将恢复游戏进度
-                        </div>
-                    </div>
-                </div>
-            );
-        }
-
-        if (screen === 'menu') {
-            return (
-                <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-purple-900 flex items-center justify-center p-4">
-                    <div className="max-w-2xl w-full">
-                        <div className="text-center mb-12">
-                            <h1 className="text-6xl font-bold text-white mb-4 drop-shadow-lg">
-                                🌐 在线对战
-                            </h1>
-                            <p className="text-xl text-gray-300">通过房间号与好友对战</p>
-                        </div>
-
-                        <div className="grid gap-6 mb-8">
-                            <button
-                                onClick={handleCreateRoom}
-                                onMouseEnter={() => window.SoundManager.playSound('hover')}
-                                className="group relative overflow-hidden rounded-2xl bg-gradient-to-br from-green-600 to-teal-600 p-8 text-left transform transition-all duration-300 hover:scale-105 hover:shadow-2xl"
-                            >
-                                <div className="relative z-10">
-                                    <div className="text-6xl mb-4">🏠</div>
-                                    <h2 className="text-3xl font-bold text-white mb-2">创建房间</h2>
-                                    <p className="text-gray-200">创建新房间，邀请好友加入</p>
-                                </div>
-                            </button>
-
-                            <div className="bg-gradient-to-br from-blue-600 to-purple-600 rounded-2xl p-8">
-                                <div className="text-6xl mb-4">🚪</div>
-                                <h2 className="text-3xl font-bold text-white mb-4">加入房间</h2>
-                                <div className="flex gap-3">
-                                    <input
-                                        type="text"
-                                        value={roomInput}
-                                        onChange={(e) => setRoomInput(e.target.value.toUpperCase())}
-                                        placeholder="输入6位房间号"
-                                        maxLength={6}
-                                        className="flex-1 px-4 py-3 rounded-lg text-xl font-bold text-center uppercase tracking-wider"
-                                        onKeyPress={(e) => e.key === 'Enter' && handleJoinRoom()}
-                                    />
-                                    <button
-                                        onClick={handleJoinRoom}
-                                        className="px-6 py-3 bg-white hover:bg-gray-100 text-blue-600 rounded-lg font-bold text-xl transition-all duration-200"
-                                    >
-                                        加入
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="text-center">
-                            <button
-                                onClick={() => { window.SoundManager.playSound('click'); window.location.href = 'index.html'; }}
-                                className="px-8 py-4 bg-gray-700 hover:bg-gray-600 text-white rounded-xl font-bold text-xl transition-all duration-200"
-                            >
-                                返回主界面
-                            </button>
-                        </div>
-
-                        <div className="mt-8 text-center text-gray-400 text-sm">
-                            <p>💡 创建房间后，将房间号分享给好友即可开始对战</p>
-                            <p className="mt-2">🔄 支持断线重连，刷新页面不会丢失进度</p>
                         </div>
                     </div>
                 </div>
@@ -1102,73 +946,110 @@
         if (screen === 'lobby') {
             return (
                 <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-purple-900 flex items-center justify-center p-4">
+                    <div className="max-w-4xl w-full">
+                        <div className="text-center mb-12">
+                            <h1 className="text-6xl font-bold text-white mb-4 drop-shadow-lg">
+                                🌐 在线对战大厅
+                            </h1>
+                            <p className="text-xl text-gray-300">选择一个房间开始游戏</p>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+                            {ROOMS.map(roomId => (
+                                <button
+                                    key={roomId}
+                                    onClick={() => handleJoinRoom(roomId)}
+                                    onMouseEnter={() => window.SoundManager.playSound('hover')}
+                                    className="bg-gradient-to-br from-purple-600 to-blue-600 rounded-xl p-6 text-white hover:scale-105 transition-all duration-200 shadow-lg"
+                                >
+                                    <div className="text-4xl mb-2">🚪</div>
+                                    <div className="text-2xl font-bold mb-1">{roomId.toUpperCase()}</div>
+                                    <div className="text-sm text-gray-200">点击加入</div>
+                                </button>
+                            ))}
+                        </div>
+                        <div className="text-center">
+                            <button onClick={() => { window.SoundManager.playSound('click'); window.location.href = 'index.html'; }} className="px-8 py-4 bg-gray-700 hover:bg-gray-600 text-white rounded-xl font-bold text-xl transition-all">
+                                返回主界面
+                            </button>
+                        </div>
+                        <div className="mt-8 text-center text-gray-400 text-sm">
+                            <p>💡 选择房间后等待对手，双方准备即可开始</p>
+                            <p className="mt-2">🔄 支持断线重连</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        if (screen === 'room') {
+            const myPlayer = roomPlayers.find(p => p.playerId === gameManagerRef.current.playerId);
+            const opponentPlayer = roomPlayers.find(p => p.playerId !== gameManagerRef.current.playerId);
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-purple-900 flex items-center justify-center p-4">
                     <div className="max-w-2xl w-full">
                         <div className="bg-gray-800 rounded-2xl p-8 shadow-2xl">
                             <div className="text-center mb-8">
                                 <h2 className="text-4xl font-bold text-white mb-2">
-                                    {gameManagerRef.current?.isHost ? '🏠 房间已创建' : '🚪 已加入房间'}
+                                    准备室 - {currentRoomId?.toUpperCase()}
                                 </h2>
-                                <div className="text-6xl font-bold text-yellow-400 my-6 tracking-widest">
-                                    {roomId}
-                                </div>
-                                <p className="text-gray-300 text-lg">
-                                    {gameManagerRef.current?.isHost ? '将房间号分享给好友' : '等待房主开始游戏'}
-                                </p>
+                                <p className="text-gray-300">等待玩家准备</p>
                             </div>
-
                             <div className="grid grid-cols-2 gap-4 mb-8">
-                                <div className="bg-red-900/30 border-2 border-red-500 rounded-xl p-6 text-center">
-                                    <div className="text-2xl mb-2">🔴</div>
-                                    <div className="text-white font-bold mb-1">红方 (房主)</div>
-                                    <div className={`text-sm ${gameManagerRef.current?.isHost ? 'text-green-400' : (opponentConnected ? 'text-green-400' : 'text-yellow-400')}`}>
-                                        {gameManagerRef.current?.isHost ? '你' : (opponentConnected ? '对手已连接' : '等待中...')}
+                                <div className={`border-2 rounded-xl p-6 text-center ${myPlayer?.ready ? 'bg-green-900/30 border-green-500' : 'bg-gray-700/30 border-gray-500'}`}>
+                                    <div className="text-2xl mb-2">👤</div>
+                                    <div className="text-white font-bold mb-1">你</div>
+                                    <div className={`text-sm ${myPlayer?.ready ? 'text-green-400' : 'text-yellow-400'}`}>
+                                        {myPlayer?.ready ? '✓ 已准备' : '未准备'}
                                     </div>
                                 </div>
-                                <div className="bg-blue-900/30 border-2 border-blue-500 rounded-xl p-6 text-center">
-                                    <div className="text-2xl mb-2">🔵</div>
-                                    <div className="text-white font-bold mb-1">蓝方 (加入者)</div>
-                                    <div className={`text-sm ${!gameManagerRef.current?.isHost ? 'text-green-400' : (opponentConnected ? 'text-green-400' : 'text-yellow-400')}`}>
-                                        {!gameManagerRef.current?.isHost ? '你' : (opponentConnected ? '对手已连接' : '等待中...')}
+                                <div className={`border-2 rounded-xl p-6 text-center ${opponentPlayer?.ready ? 'bg-green-900/30 border-green-500' : 'bg-gray-700/30 border-gray-500'}`}>
+                                    <div className="text-2xl mb-2">{opponentPlayer ? '👤' : '⏳'}</div>
+                                    <div className="text-white font-bold mb-1">{opponentPlayer ? '对手' : '等待中...'}</div>
+                                    <div className={`text-sm ${opponentPlayer?.ready ? 'text-green-400' : 'text-yellow-400'}`}>
+                                        {opponentPlayer ? (opponentPlayer.ready ? '✓ 已准备' : '未准备') : '等待加入'}
                                     </div>
                                 </div>
                             </div>
-
                             <div className="flex gap-4">
-                                {gameManagerRef.current?.isHost && (
-                                    <button
-                                        onClick={handleStartGame}
-                                        disabled={!opponentConnected}
-                                        className={`flex-1 py-4 rounded-xl font-bold text-xl transition-all duration-200 ${
-                                            opponentConnected
-                                                ? 'bg-green-600 hover:bg-green-700 text-white'
-                                                : 'bg-gray-600 text-gray-400 cursor-not-allowed'
-                                        }`}
-                                    >
-                                        {opponentConnected ? '开始游戏' : '等待对手...'}
-                                    </button>
-                                )}
-                                {!gameManagerRef.current?.isHost && (
-                                    <div className="flex-1 py-4 rounded-xl font-bold text-xl text-center bg-gray-700 text-gray-300">
-                                        等待房主开始游戏...
-                                    </div>
-                                )}
-                                <button
-                                    onClick={handleBackToLobby}
-                                    className="px-8 py-4 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-xl transition-all duration-200"
-                                >
-                                    退出
+                                <button onClick={handleToggleReady} disabled={!opponentPlayer} className={`flex-1 py-4 rounded-xl font-bold text-xl transition-all ${!opponentPlayer ? 'bg-gray-600 text-gray-400 cursor-not-allowed' : (myPlayer?.ready ? 'bg-yellow-600 hover:bg-yellow-700 text-white' : 'bg-green-600 hover:bg-green-700 text-white')}`}>
+                                    {myPlayer?.ready ? '取消准备' : '准备'}
+                                </button>
+                                <button onClick={handleLeaveRoom} className="px-8 py-4 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-xl transition-all">
+                                    离开
                                 </button>
                             </div>
-
-                            <div className="mt-6 text-center">
-                                <div className="inline-flex items-center gap-2 px-4 py-2 bg-gray-700 rounded-lg">
-                                    <div className={`w-3 h-3 rounded-full ${opponentConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`}></div>
-                                    <span className="text-gray-300 text-sm">
-                                        {opponentConnected ? '对手在线' : '等待对手连接...'}
-                                    </span>
+                            {canStartGame && (
+                                <div className="mt-6 text-center">
+                                    <div className="inline-block px-6 py-3 bg-green-600 rounded-lg animate-pulse">
+                                        <span className="text-white font-bold">双方已准备，即将开始抽签...</span>
+                                    </div>
                                 </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        if (screen === 'roulette' && showRoulette) {
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-90 z-[200] flex items-center justify-center">
+                    <div className="text-center">
+                        <h1 className="text-4xl font-bold text-white mb-8">红蓝抽签中...</h1>
+                        <div className="relative w-64 h-64 mx-auto">
+                            <div className="absolute inset-0 rounded-full border-8 border-gray-700 overflow-hidden animate-spin" style={{ animationDuration: '0.5s' }}>
+                                <div className="absolute top-0 left-0 w-full h-1/2 bg-red-600"></div>
+                                <div className="absolute bottom-0 left-0 w-full h-1/2 bg-blue-600"></div>
+                            </div>
+                            <div className="absolute inset-0 flex items-center justify-center">
+                                <div className="w-4 h-20 bg-yellow-400 rounded-full shadow-2xl" style={{ transform: 'translateY(-60px)' }}></div>
                             </div>
                         </div>
+                        {rouletteResult && (
+                            <div className="mt-8 text-3xl font-bold animate-pulse text-white">
+                                {rouletteResult === 'red' ? '🔴 你是红方！' : '🔵 你是蓝方！'}
+                            </div>
+                        )}
                     </div>
                 </div>
             );
@@ -1178,7 +1059,7 @@
             if (!window.GameUI) {
                 return <div className="text-white text-center mt-40 text-xl">游戏UI未加载…</div>;
             }
-            
+            const opponentOnline = roomPlayers.length === 2;
             return (
                 <window.GameUI
                     gameState={gameState}
@@ -1202,11 +1083,14 @@
                         <div className="fixed top-4 right-4 z-50 bg-gray-800 rounded-lg p-3 shadow-lg border-2 border-purple-500">
                             <div className="text-white text-sm">
                                 <div className="font-bold mb-1">🌐 在线对战</div>
-                                <div className="text-yellow-400 font-mono">房间: {roomId}</div>
-                                <div className={`text-xs mt-1 flex items-center gap-1 ${opponentConnected ? 'text-green-400' : 'text-red-400'}`}>
-                                    <div className={`w-2 h-2 rounded-full ${opponentConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-                                    {opponentConnected ? '对手在线' : '对手离线'}
+                                <div className="text-yellow-400 font-mono text-xs">房间: {currentRoomId?.toUpperCase()}</div>
+                                <div className={`text-xs mt-1 flex items-center gap-1 ${opponentOnline ? 'text-green-400' : 'text-red-400'}`}>
+                                    <div className={`w-2 h-2 rounded-full ${opponentOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                                    {opponentOnline ? '对手在线' : '对手离线'}
                                 </div>
+                                <button onClick={handleBackToLobby} className="mt-2 w-full px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition-all">
+                                    退出游戏
+                                </button>
                             </div>
                         </div>
                     }
