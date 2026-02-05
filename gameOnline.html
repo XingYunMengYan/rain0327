@@ -252,7 +252,38 @@
                         return [...prev, { playerId: message.playerId, ready: false }];
                     });
                     window.SoundManager.playSound('click');
+
+                    // ==================== 修复开始 ====================
+                    // 如果是别人加入了，我需要告诉他“我已经在房间里了”
+                    // 这样后加入的人才能看到先加入的人
+                    if (message.playerId !== gameManagerRef.current.playerId) {
+                        gameManagerRef.current.sendMessage({ 
+                            type: 'player-exist', 
+                            playerId: gameManagerRef.current.playerId,
+                            ready: gameManagerRef.current.isReady // 同步我的准备状态
+                        });
+                    }
+                    // ==================== 修复结束 ====================
                     break;
+
+                // ==================== 新增 case ====================
+                // 处理“老玩家”发来的存在宣告
+                case 'player-exist':
+                    setRoomPlayers(prev => {
+                        // 如果列表里已经有这个人，只更新状态（防止重复添加）
+                        if (prev.find(p => p.playerId === message.playerId)) {
+                            return prev.map(p => 
+                                p.playerId === message.playerId 
+                                    ? { ...p, ready: message.ready } 
+                                    : p
+                            );
+                        }
+                        // 如果没有，添加进列表
+                        return [...prev, { playerId: message.playerId, ready: message.ready }];
+                    });
+                    break;
+                // ==================== 新增结束 ====================
+
                 case 'player-ready':
                     setRoomPlayers(prev => 
                         prev.map(p => 
