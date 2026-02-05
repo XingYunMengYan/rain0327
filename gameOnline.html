@@ -537,7 +537,7 @@
                     log: [...prev.log, `${opponentSide === 'red' ? '红方' : '蓝方'}选了一张牌`]
                 };
             });
-        
+        };
             } else if (phase === 'bluePicking') {
                 setGameState(prev => {
                     const newHand = [...prev.blue.hand, card];
