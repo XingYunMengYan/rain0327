@@ -315,7 +315,7 @@
                 case 'player-reconnect':
                     addLog(`${message.playerSide === 'red' ? '红方' : '蓝方'}已重新连接`);
                     break;
-                case 'pick-card': handleRemotePickCard(message.card); break;
+               case 'pick-card': handleRemotePickCard(message); break;
                 case 'play-card': handleRemotePlayCard(message.card, message.laneIndex); break;
                 case 'use-support': handleRemoteUseSupport(message.card, message.targetPlayer, message.laneIndex); break;
                 case 'confirm-use': handleRemoteConfirmUse(message.card); break;
