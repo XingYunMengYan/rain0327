@@ -71,15 +71,6 @@
         clearSession() {
             localStorage.removeItem(this.STORAGE_KEY);
             console.log('[ReconnectManager] 会话已清除');
-        },
-        
-        updateGameState(gameState, gamePhase) {
-            const session = this.loadSession();
-            if (session) {
-                session.gameState = gameState;
-                session.gamePhase = gamePhase;
-                this.saveSession(session);
-            }
         }
     };
 
@@ -103,7 +94,7 @@
             this.pubnub = new PubNub({
                 ...PUBNUB_CONFIG,
                 uuid: this.playerId,
-                heartbeatInterval: 10  // 10秒心跳
+                heartbeatInterval: 10
             });
             console.log('[GameManager] 初始化，playerId:', this.playerId);
         }
@@ -180,7 +171,6 @@
         }
 
         startHeartbeat() {
-            // 每30秒发送一次心跳
             this.heartbeatInterval = setInterval(() => {
                 this.sendMessage({ type: 'heartbeat' });
             }, 30000);
@@ -215,13 +205,17 @@
     // 主应用组件
     // ══════════════════════════════════════════════════════════
     const OnlineGame = () => {
+        // UI 和资源加载
         const [uiReady, setUiReady] = useState(false);
+        const [allCards, setAllCards] = useState([]);
+        
         useEffect(() => { 
-            window.GameUILoader.load().then(() => setUiReady(true)); 
+            window.GameUILoader.load().then(() => setUiReady(true)).catch(err => {
+                console.error('UI加载失败:', err);
+            }); 
             window.SoundManager.restoreFromStorage(); 
         }, []);
 
-        const [allCards, setAllCards] = useState([]);
         useEffect(() => { 
             window.loadCards().then(cards => setAllCards(cards)).catch(err => { 
                 console.error('加载卡牌失败', err); 
@@ -229,28 +223,59 @@
             }); 
         }, []);
 
+        // 初始游戏状态
         const INIT_STATE = {
-            turn: 0, phase: 'idle',
-            red:  { health: 30, coins: 0, hand: [], battlefield: [null,null,null,null], miracleDrawn: [30] },
-            blue: { health: 30, coins: 0, hand: [], battlefield: [null,null,null,null], miracleDrawn: [30] },
-            deck: [], miracleDeck: [], discardPile: [], initialCards: [], initialCardsBlue: [], selectedCard: null, log: []
+            turn: 0, 
+            phase: 'idle',
+            red: { 
+                health: 30, 
+                coins: 0, 
+                hand: [], 
+                battlefield: [null, null, null, null], 
+                miracleDrawn: [30] 
+            },
+            blue: { 
+                health: 30, 
+                coins: 0, 
+                hand: [], 
+                battlefield: [null, null, null, null], 
+                miracleDrawn: [30] 
+            },
+            deck: [], 
+            miracleDeck: [], 
+            discardPile: [], 
+            initialCards: [], 
+            initialCardsBlue: [], 
+            selectedCard: null, 
+            log: []
         };
 
         // 网络状态
         const [screen, setScreen] = useState('menu');
         const [roomId, setRoomId] = useState('');
         const [roomInput, setRoomInput] = useState('');
-        const [gameManager] = useState(() => new OnlineGameManager());
+        const gameManagerRef = useRef(new OnlineGameManager());
         const [opponentConnected, setOpponentConnected] = useState(false);
         const [showReconnectPrompt, setShowReconnectPrompt] = useState(false);
         const [reconnectData, setReconnectData] = useState(null);
 
         // 游戏状态
         const [gameState, setGameState] = useState(INIT_STATE);
+        const gameStateRef = useRef(gameState);
         const [gamePhase, setGamePhase] = useState('notStarted');
+        const gamePhaseRef = useRef(gamePhase);
         const [winner, setWinner] = useState(null);
         const [battleAnimation, setBattleAnimation] = useState({ active: false, lane: -1 });
         const [cardShowOverlay, setCardShowOverlay] = useState(null);
+
+        // 同步 refs
+        useEffect(() => {
+            gameStateRef.current = gameState;
+        }, [gameState]);
+
+        useEffect(() => {
+            gamePhaseRef.current = gamePhase;
+        }, [gamePhase]);
 
         // ══════════════════════════════════════════════════════════
         // 断线重连 - 初始化检查
@@ -267,8 +292,8 @@
             if (!reconnectData) return;
             
             console.log('[Reconnect] 重连到房间:', reconnectData.roomId);
-            gameManager.init(reconnectData.playerId);
-            gameManager.rejoinRoom(
+            gameManagerRef.current.init(reconnectData.playerId);
+            gameManagerRef.current.rejoinRoom(
                 reconnectData.roomId,
                 reconnectData.isHost,
                 reconnectData.playerSide
@@ -294,6 +319,9 @@
             window.SoundManager.playSound('click');
         };
 
+        // ══════════════════════════════════════════════════════════
+        // 日志和卡牌展示
+        // ══════════════════════════════════════════════════════════
         const addLog = useCallback((msg) => { 
             setGameState(prev => ({ ...prev, log: [...prev.log, msg] })); 
         }, []);
@@ -312,9 +340,9 @@
             if (screen === 'game' || screen === 'lobby') {
                 ReconnectManager.saveSession({
                     roomId,
-                    playerId: gameManager.playerId,
-                    playerSide: gameManager.playerSide,
-                    isHost: gameManager.isHost,
+                    playerId: gameManagerRef.current.playerId,
+                    playerSide: gameManagerRef.current.playerSide,
+                    isHost: gameManagerRef.current.isHost,
                     gameState,
                     gamePhase,
                     screen
@@ -323,43 +351,10 @@
         }, [gameState, gamePhase, screen, roomId]);
 
         // ══════════════════════════════════════════════════════════
-        // 网络消息处理
+        // 网络消息处理核心函数
         // ══════════════════════════════════════════════════════════
-        useEffect(() => {
-            if (!reconnectData) {
-                gameManager.init();
-            }
-            return () => {
-                gameManager.leaveRoom();
-            };
-        }, []);
-
-        // 将这个 useEffect 改为只设置一次回调
-useEffect(() => {
-    gameManager.setMessageCallback((message) => {
-        handleNetworkMessage(message);
-    });
-
-    gameManager.setPresenceCallback((event) => {
-        console.log('[Presence处理] action:', event.action, 'uuid:', event.uuid, '我的uuid:', gameManager.playerId);
-        
-        if (event.uuid !== gameManager.playerId) {
-            if (event.action === 'join' || event.action === 'state-change') {
-                console.log('[Presence处理] 对手上线');
-                setOpponentConnected(true);
-                window.SoundManager.playSound('click');
-            } else if (event.action === 'leave' || event.action === 'timeout') {
-                console.log('[Presence处理] 对手离线');
-                setOpponentConnected(false);
-                addLog('⚠️ 对手已离开房间');
-            }
-        }
-    });
-}, []); // 空依赖数组，只在组件挂载时设置一次
-        }, [screen, gameState, gamePhase]);
-
         const handleNetworkMessage = useCallback((message) => {
-            console.log('收到消息:', message.type, message);
+            console.log('[收到消息]', message.type, message);
 
             switch (message.type) {
                 case 'player-joined':
@@ -379,18 +374,17 @@ useEffect(() => {
                     break;
                 
                 case 'heartbeat':
-                    // 心跳消息，静默处理
                     setOpponentConnected(true);
                     break;
                 
                 case 'start-game':
-                    console.log('📨 处理 start-game，playerSide:', gameManager.playerSide, 'isHost:', gameManager.isHost);
-                    // 使用 playerSide 判断更可靠
-                    if (gameManager.playerSide === 'blue') {
-                        console.log('蓝方玩家收到 start-game，seed:', message.seed);
-                        initializeGame(message.seed);
+                    console.log('[收到 start-game] playerSide:', gameManagerRef.current.playerSide, 'seed:', message.seed);
+                    if (gameManagerRef.current.playerSide === 'blue') {
+                        console.log('[二号玩家] 开始初始化游戏');
+                        initializeGameWithSeed(message.seed);
                     }
                     break;
+
                 case 'pick-card':
                     handleRemotePickCard(message.card);
                     break;
@@ -416,7 +410,6 @@ useEffect(() => {
                     break;
 
                 case 'sync-state':
-                    // 状态同步（用于断线重连后同步）
                     if (message.gameState && message.gamePhase) {
                         console.log('[同步] 收到状态同步');
                         setGameState(message.gameState);
@@ -425,13 +418,48 @@ useEffect(() => {
                     }
                     break;
             }
-        }, [gameState, gamePhase, gameManager.isHost]);
+        }, [addLog]);
+
+        // ══════════════════════════════════════════════════════════
+        // 网络监听器初始化
+        // ══════════════════════════════════════════════════════════
+        useEffect(() => {
+            if (!reconnectData) {
+                gameManagerRef.current.init();
+            }
+
+            // 设置消息回调
+            gameManagerRef.current.setMessageCallback((message) => {
+                handleNetworkMessage(message);
+            });
+
+            // 设置 Presence 回调
+            gameManagerRef.current.setPresenceCallback((event) => {
+                console.log('[Presence处理] action:', event.action, 'uuid:', event.uuid);
+                
+                if (event.uuid !== gameManagerRef.current.playerId) {
+                    if (event.action === 'join' || event.action === 'state-change') {
+                        console.log('[Presence处理] 对手上线');
+                        setOpponentConnected(true);
+                        window.SoundManager.playSound('click');
+                    } else if (event.action === 'leave' || event.action === 'timeout') {
+                        console.log('[Presence处理] 对手离线');
+                        setOpponentConnected(false);
+                        addLog('⚠️ 对手已离开房间');
+                    }
+                }
+            });
+
+            return () => {
+                gameManagerRef.current.leaveRoom();
+            };
+        }, [handleNetworkMessage, reconnectData, addLog]);
 
         // ══════════════════════════════════════════════════════════
         // 房间管理
         // ══════════════════════════════════════════════════════════
         const handleCreateRoom = () => {
-            const newRoomId = gameManager.createRoom();
+            const newRoomId = gameManagerRef.current.createRoom();
             setRoomId(newRoomId);
             setScreen('lobby');
             window.SoundManager.playSound('click');
@@ -442,7 +470,7 @@ useEffect(() => {
                 alert('请输入房间号！');
                 return;
             }
-            gameManager.joinRoom(roomInput.toUpperCase());
+            gameManagerRef.current.joinRoom(roomInput.toUpperCase());
             setRoomId(roomInput.toUpperCase());
             setScreen('lobby');
             window.SoundManager.playSound('click');
@@ -455,14 +483,15 @@ useEffect(() => {
             }
             
             const seed = Date.now();
-            gameManager.sendMessage({ type: 'start-game', seed });
-            initializeGame(seed);
+            console.log('[房主] 发送 start-game，seed:', seed);
+            gameManagerRef.current.sendMessage({ type: 'start-game', seed });
+            initializeGameWithSeed(seed);
             window.SoundManager.playSound('click');
         };
 
         const handleBackToLobby = () => {
             if (confirm('确定要离开游戏吗？进度将会丢失。')) {
-                gameManager.leaveRoom();
+                gameManagerRef.current.leaveRoom();
                 ReconnectManager.clearSession();
                 setScreen('menu');
                 setRoomId('');
@@ -477,9 +506,10 @@ useEffect(() => {
         // ══════════════════════════════════════════════════════════
         // 游戏初始化
         // ══════════════════════════════════════════════════════════
-        const initializeGame = (seed) => {
-            console.log('[initializeGame] 被调用，seed:', seed, 'playerSide:', gameManager.playerSide);
-            if (!allCards.length) {
+        const initializeGameWithSeed = (seed) => {
+            console.log('[initializeGame] seed:', seed, 'playerSide:', gameManagerRef.current.playerSide);
+            
+            if (!allCards || allCards.length === 0) {
                 console.error('[initializeGame] allCards 为空！');
                 return;
             }
@@ -522,115 +552,127 @@ useEffect(() => {
                 initialCardsBlue: blueSix,
                 log: [
                     '🌐 在线游戏开始！',
-                    `你是${gameManager.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}`,
+                    `你是${gameManagerRef.current.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}`,
                     '双方各抽取1张奇迹牌',
                     '--- 选牌阶段开始 ---'
                 ]
             });
             setGamePhase('redPicking');
             setScreen('game');
+            
+            console.log('[initializeGame] 完成，切换到 game 界面');
         };
 
         // ══════════════════════════════════════════════════════════
-        // 游戏操作 - 选牌阶段
+        // 选牌阶段
         // ══════════════════════════════════════════════════════════
         const pickCard = (card) => {
-            const isMyTurn = (gamePhase === 'redPicking' && gameManager.playerSide === 'red') || 
-                            (gamePhase === 'bluePicking' && gameManager.playerSide === 'blue');
+            const phase = gamePhaseRef.current;
+            const isMyTurn = (phase === 'redPicking' && gameManagerRef.current.playerSide === 'red') || 
+                            (phase === 'bluePicking' && gameManagerRef.current.playerSide === 'blue');
             if (!isMyTurn) return;
 
             window.SoundManager.playSound('click');
-            gameManager.sendMessage({ type: 'pick-card', card });
+            gameManagerRef.current.sendMessage({ type: 'pick-card', card });
 
-            if (gamePhase === 'redPicking') {
-                const newHand = [...gameState.red.hand, card];
-                const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
-                if (newHand.length === 3) {
-                    setGameState(prev => ({
-                        ...prev,
-                        red: { ...prev.red, hand: newHand },
-                        initialCards: prev.initialCardsBlue,
-                        deck: window.shuffleArray([...prev.deck, ...remaining]),
-                        log: [...prev.log, '红方选牌完成']
-                    }));
-                    setGamePhase('bluePicking');
-                } else {
-                    setGameState(prev => ({
-                        ...prev,
-                        red: { ...prev.red, hand: newHand },
-                        initialCards: remaining,
-                        log: [...prev.log, `红方选择了 ${card.name}`]
-                    }));
-                }
-            } else if (gamePhase === 'bluePicking') {
-                const newHand = [...gameState.blue.hand, card];
-                const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
-                if (newHand.length === 3) {
-                    setGameState(prev => ({
-                        ...prev,
-                        blue: { ...prev.blue, hand: newHand },
-                        initialCards: [],
-                        deck: window.shuffleArray([...prev.deck, ...remaining]),
-                        log: [...prev.log, '蓝方选牌完成 → 选牌阶段结束']
-                    }));
-                    setGamePhase('playing');
-                } else {
-                    setGameState(prev => ({
-                        ...prev,
-                        blue: { ...prev.blue, hand: newHand },
-                        initialCards: remaining,
-                        log: [...prev.log, `蓝方选择了 ${card.name}`]
-                    }));
-                }
+            if (phase === 'redPicking') {
+                setGameState(prev => {
+                    const newHand = [...prev.red.hand, card];
+                    const remaining = prev.initialCards.filter(c => c.instanceId !== card.instanceId);
+                    if (newHand.length === 3) {
+                        setGamePhase('bluePicking');
+                        return {
+                            ...prev,
+                            red: { ...prev.red, hand: newHand },
+                            initialCards: prev.initialCardsBlue,
+                            deck: window.shuffleArray([...prev.deck, ...remaining]),
+                            log: [...prev.log, '红方选牌完成']
+                        };
+                    } else {
+                        return {
+                            ...prev,
+                            red: { ...prev.red, hand: newHand },
+                            initialCards: remaining,
+                            log: [...prev.log, `红方选择了 ${card.name}`]
+                        };
+                    }
+                });
+            } else if (phase === 'bluePicking') {
+                setGameState(prev => {
+                    const newHand = [...prev.blue.hand, card];
+                    const remaining = prev.initialCards.filter(c => c.instanceId !== card.instanceId);
+                    if (newHand.length === 3) {
+                        setGamePhase('playing');
+                        return {
+                            ...prev,
+                            blue: { ...prev.blue, hand: newHand },
+                            initialCards: [],
+                            deck: window.shuffleArray([...prev.deck, ...remaining]),
+                            log: [...prev.log, '蓝方选牌完成 → 选牌阶段结束']
+                        };
+                    } else {
+                        return {
+                            ...prev,
+                            blue: { ...prev.blue, hand: newHand },
+                            initialCards: remaining,
+                            log: [...prev.log, `蓝方选择了 ${card.name}`]
+                        };
+                    }
+                });
             }
         };
 
         const handleRemotePickCard = (card) => {
-            const opponentSide = gameManager.playerSide === 'red' ? 'blue' : 'red';
-            const isOpponentTurn = (gamePhase === 'redPicking' && opponentSide === 'red') || 
-                                  (gamePhase === 'bluePicking' && opponentSide === 'blue');
+            const phase = gamePhaseRef.current;
+            const opponentSide = gameManagerRef.current.playerSide === 'red' ? 'blue' : 'red';
+            const isOpponentTurn = (phase === 'redPicking' && opponentSide === 'red') || 
+                                  (phase === 'bluePicking' && opponentSide === 'blue');
             if (!isOpponentTurn) return;
 
-            if (gamePhase === 'redPicking') {
-                const newHand = [...gameState.red.hand, card];
-                const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
-                if (newHand.length === 3) {
-                    setGameState(prev => ({
-                        ...prev,
-                        red: { ...prev.red, hand: newHand },
-                        initialCards: prev.initialCardsBlue,
-                        deck: window.shuffleArray([...prev.deck, ...remaining]),
-                        log: [...prev.log, '红方选牌完成']
-                    }));
-                    setGamePhase('bluePicking');
-                } else {
-                    setGameState(prev => ({
-                        ...prev,
-                        red: { ...prev.red, hand: newHand },
-                        initialCards: remaining,
-                        log: [...prev.log, `红方选择了 ${card.name}`]
-                    }));
-                }
-            } else if (gamePhase === 'bluePicking') {
-                const newHand = [...gameState.blue.hand, card];
-                const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
-                if (newHand.length === 3) {
-                    setGameState(prev => ({
-                        ...prev,
-                        blue: { ...prev.blue, hand: newHand },
-                        initialCards: [],
-                        deck: window.shuffleArray([...prev.deck, ...remaining]),
-                        log: [...prev.log, '蓝方选牌完成 → 选牌阶段结束']
-                    }));
-                    setGamePhase('playing');
-                } else {
-                    setGameState(prev => ({
-                        ...prev,
-                        blue: { ...prev.blue, hand: newHand },
-                        initialCards: remaining,
-                        log: [...prev.log, `蓝方选择了 ${card.name}`]
-                    }));
-                }
+            if (phase === 'redPicking') {
+                setGameState(prev => {
+                    const newHand = [...prev.red.hand, card];
+                    const remaining = prev.initialCards.filter(c => c.instanceId !== card.instanceId);
+                    if (newHand.length === 3) {
+                        setGamePhase('bluePicking');
+                        return {
+                            ...prev,
+                            red: { ...prev.red, hand: newHand },
+                            initialCards: prev.initialCardsBlue,
+                            deck: window.shuffleArray([...prev.deck, ...remaining]),
+                            log: [...prev.log, '红方选牌完成']
+                        };
+                    } else {
+                        return {
+                            ...prev,
+                            red: { ...prev.red, hand: newHand },
+                            initialCards: remaining,
+                            log: [...prev.log, `红方选择了 ${card.name}`]
+                        };
+                    }
+                });
+            } else if (phase === 'bluePicking') {
+                setGameState(prev => {
+                    const newHand = [...prev.blue.hand, card];
+                    const remaining = prev.initialCards.filter(c => c.instanceId !== card.instanceId);
+                    if (newHand.length === 3) {
+                        setGamePhase('playing');
+                        return {
+                            ...prev,
+                            blue: { ...prev.blue, hand: newHand },
+                            initialCards: [],
+                            deck: window.shuffleArray([...prev.deck, ...remaining]),
+                            log: [...prev.log, '蓝方选牌完成 → 选牌阶段结束']
+                        };
+                    } else {
+                        return {
+                            ...prev,
+                            blue: { ...prev.blue, hand: newHand },
+                            initialCards: remaining,
+                            log: [...prev.log, `蓝方选择了 ${card.name}`]
+                        };
+                    }
+                });
             }
         };
 
@@ -638,66 +680,76 @@ useEffect(() => {
         // 回合开始
         // ══════════════════════════════════════════════════════════
         const startTurn = () => {
-            if (gameManager.playerSide !== 'red') return;
-            gameManager.sendMessage({ type: 'start-turn' });
-            handleRemoteStartTurn();
+            if (gameManagerRef.current.playerSide !== 'red') return;
+            gameManagerRef.current.sendMessage({ type: 'start-turn' });
+            doStartTurn();
         };
 
         const handleRemoteStartTurn = () => {
-            const newTurn = gameState.turn + 1;
-            const coins = Math.min(newTurn, 10);
-            const logs = [`--- 第${newTurn}回合开始 ---`, `双方获得 ${coins} 金币`];
-            
-            let deck = [...gameState.deck];
-            let redHand = [...gameState.red.hand];
-            let blueHand = [...gameState.blue.hand];
+            doStartTurn();
+        };
 
-            if (newTurn >= 2) {
-                for (let i = 0; i < 2; i++) {
-                    const r = deck.pop();
-                    if (r) redHand.push(r);
-                    const b = deck.pop();
-                    if (b) blueHand.push(b);
+        const doStartTurn = () => {
+            setGameState(prev => {
+                const newTurn = prev.turn + 1;
+                const coins = Math.min(newTurn, 10);
+                const logs = [`--- 第${newTurn}回合开始 ---`, `双方获得 ${coins} 金币`];
+                
+                let deck = [...prev.deck];
+                let redHand = [...prev.red.hand];
+                let blueHand = [...prev.blue.hand];
+
+                if (newTurn >= 2) {
+                    for (let i = 0; i < 2; i++) {
+                        const r = deck.pop();
+                        if (r) redHand.push(r);
+                        const b = deck.pop();
+                        if (b) blueHand.push(b);
+                    }
+                    logs.push('双方各抽2张牌');
+                } else {
+                    logs.push('第一回合不抽牌');
                 }
-                logs.push('双方各抽2张牌');
-            } else {
-                logs.push('第一回合不抽牌');
-            }
 
-            setGameState(prev => ({
-                ...prev,
-                turn: newTurn,
-                phase: 'redDeploy',
-                deck,
-                red: { ...prev.red, coins, hand: redHand },
-                blue: { ...prev.blue, coins, hand: blueHand },
-                log: [...prev.log, ...logs]
-            }));
+                return {
+                    ...prev,
+                    turn: newTurn,
+                    phase: 'redDeploy',
+                    deck,
+                    red: { ...prev.red, coins, hand: redHand },
+                    blue: { ...prev.blue, coins, hand: blueHand },
+                    log: [...prev.log, ...logs]
+                };
+            });
         };
 
         // ══════════════════════════════════════════════════════════
         // 卡牌操作
         // ══════════════════════════════════════════════════════════
         const selectCard = (card, player) => {
-            if (player !== gameManager.playerSide || gameState.phase === 'idle' || gameState.phase === 'battle') return;
-            const isRedPhase = gameState.phase === 'redDeploy' || gameState.phase === 'redSupport';
+            const phase = gameStateRef.current.phase;
+            if (player !== gameManagerRef.current.playerSide || phase === 'idle' || phase === 'battle') return;
+            const isRedPhase = phase === 'redDeploy' || phase === 'redSupport';
             if ((isRedPhase && player !== 'red') || (!isRedPhase && player !== 'blue')) return;
             
-            if (gameState.selectedCard?.instanceId === card.instanceId) {
-                setGameState(prev => ({ ...prev, selectedCard: null }));
-                return;
-            }
-            setGameState(prev => ({ ...prev, selectedCard: card }));
+            setGameState(prev => {
+                if (prev.selectedCard?.instanceId === card.instanceId) {
+                    return { ...prev, selectedCard: null };
+                }
+                return { ...prev, selectedCard: card };
+            });
         };
 
         const playCard = (laneIndex) => {
-            const card = gameState.selectedCard;
+            const state = gameStateRef.current;
+            const card = state.selectedCard;
             if (!card || card.type !== 'battlefield') return;
             
-            const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-            if (player !== gameManager.playerSide) return;
+            const phase = state.phase;
+            const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
+            if (player !== gameManagerRef.current.playerSide) return;
 
-            const playerState = gameState[player];
+            const playerState = state[player];
             if (playerState.coins < card.cost) {
                 addLog('金币不足！');
                 return;
@@ -708,57 +760,62 @@ useEffect(() => {
             }
 
             window.SoundManager.playSound('place');
-            gameManager.sendMessage({ type: 'play-card', card, laneIndex });
+            gameManagerRef.current.sendMessage({ type: 'play-card', card, laneIndex });
 
-            const bf = [...playerState.battlefield];
-            bf[laneIndex] = { ...card };
-            setGameState(prev => ({
-                ...prev,
-                [player]: {
-                    ...playerState,
-                    battlefield: bf,
-                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
-                    coins: playerState.coins - card.cost
-                },
-                selectedCard: null,
-                log: [...prev.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了 ${card.name}`]
-            }));
+            setGameState(prev => {
+                const bf = [...prev[player].battlefield];
+                bf[laneIndex] = { ...card };
+                return {
+                    ...prev,
+                    [player]: {
+                        ...prev[player],
+                        battlefield: bf,
+                        hand: prev[player].hand.filter(c => c.instanceId !== card.instanceId),
+                        coins: prev[player].coins - card.cost
+                    },
+                    selectedCard: null,
+                    log: [...prev.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了 ${card.name}`]
+                };
+            });
         };
 
         const handleRemotePlayCard = (card, laneIndex) => {
-            const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-            if (player === gameManager.playerSide) return;
+            const state = gameStateRef.current;
+            const phase = state.phase;
+            const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
+            if (player === gameManagerRef.current.playerSide) return;
 
-            const playerState = gameState[player];
-            const bf = [...playerState.battlefield];
-            bf[laneIndex] = { ...card };
-            
-            setGameState(prev => ({
-                ...prev,
-                [player]: {
-                    ...playerState,
-                    battlefield: bf,
-                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
-                    coins: playerState.coins - card.cost
-                },
-                log: [...prev.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了 ${card.name}`]
-            }));
+            setGameState(prev => {
+                const bf = [...prev[player].battlefield];
+                bf[laneIndex] = { ...card };
+                return {
+                    ...prev,
+                    [player]: {
+                        ...prev[player],
+                        battlefield: bf,
+                        hand: prev[player].hand.filter(c => c.instanceId !== card.instanceId),
+                        coins: prev[player].coins - card.cost
+                    },
+                    log: [...prev.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了 ${card.name}`]
+                };
+            });
         };
 
         // ══════════════════════════════════════════════════════════
-        // 支援/奇迹牌使用 - 接入 CardEffects
+        // 支援/奇迹牌使用
         // ══════════════════════════════════════════════════════════
         const useCardOnTarget = (targetPlayer, laneIndex) => {
-            const card = gameState.selectedCard;
+            const state = gameStateRef.current;
+            const card = state.selectedCard;
             if (!card || (card.type !== 'support' && card.type !== 'miracle')) return;
             
-            const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-            if (player !== gameManager.playerSide) return;
+            const phase = state.phase;
+            const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
+            if (player !== gameManagerRef.current.playerSide) return;
 
-            const playerState = gameState[player];
-            const target = gameState[targetPlayer].battlefield[laneIndex];
+            const playerState = state[player];
+            const target = state[targetPlayer].battlefield[laneIndex];
             
-            // 检查是否需要目标
             const needsTarget = window.EffectEngine?.needsTarget(card.id) || false;
             if (needsTarget && !target) {
                 addLog('目标位置没有单位！');
@@ -771,8 +828,7 @@ useEffect(() => {
                 return;
             }
 
-            // 发送网络消息
-            gameManager.sendMessage({ 
+            gameManagerRef.current.sendMessage({ 
                 type: 'use-support', 
                 card, 
                 targetPlayer, 
@@ -780,54 +836,57 @@ useEffect(() => {
                 needsTarget 
             });
 
-            // 应用效果
             applyCardEffect(card, player, target);
         };
 
-        const handleRemoteUseSupport = (card, targetPlayer, laneIndex, needsTarget) => {
-            const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-            if (player === gameManager.playerSide) return;
+        const handleRemoteUseSupport = (card, targetPlayer, laneIndex) => {
+            const state = gameStateRef.current;
+            const phase = state.phase;
+            const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
+            if (player === gameManagerRef.current.playerSide) return;
 
-            const target = needsTarget ? gameState[targetPlayer].battlefield[laneIndex] : null;
+            const needsTarget = window.EffectEngine?.needsTarget(card.id) || false;
+            const target = needsTarget ? state[targetPlayer].battlefield[laneIndex] : null;
             applyCardEffect(card, player, target);
         };
 
         const confirmUse = () => {
-            const card = gameState.selectedCard;
+            const state = gameStateRef.current;
+            const card = state.selectedCard;
             if (!card) return;
             
-            const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-            if (player !== gameManager.playerSide) return;
+            const phase = state.phase;
+            const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
+            if (player !== gameManagerRef.current.playerSide) return;
 
-            const playerState = gameState[player];
+            const playerState = state[player];
             const cost = card.type === 'miracle' ? 0 : card.cost;
             if (playerState.coins < cost) {
                 addLog('金币不足！');
                 return;
             }
 
-            gameManager.sendMessage({ type: 'confirm-use', card });
+            gameManagerRef.current.sendMessage({ type: 'confirm-use', card });
             applyCardEffect(card, player, null);
         };
 
         const handleRemoteConfirmUse = (card) => {
-            const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-            if (player === gameManager.playerSide) return;
+            const state = gameStateRef.current;
+            const phase = state.phase;
+            const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
+            if (player === gameManagerRef.current.playerSide) return;
 
             applyCardEffect(card, player, null);
         };
 
         // ══════════════════════════════════════════════════════════
-        // 卡牌效果应用（核心函数）
+        // 卡牌效果应用
         // ══════════════════════════════════════════════════════════
         const applyCardEffect = (card, player, target) => {
             const cost = card.type === 'miracle' ? 0 : card.cost;
-            
-            // 显示卡牌动画
             showCardOverlay(card);
 
             setGameState(prev => {
-                // 先扣除费用和移除手牌
                 let newState = {
                     ...prev,
                     [player]: {
@@ -838,7 +897,6 @@ useEffect(() => {
                     discardPile: [...prev.discardPile, card]
                 };
 
-                // 如果有效果引擎，应用效果
                 if (window.EffectEngine) {
                     try {
                         const context = {
@@ -853,7 +911,6 @@ useEffect(() => {
                         console.log('[applyCardEffect] 触发效果:', card.name, card.id);
                         const resultState = window.EffectEngine.trigger(card.id, context, newState);
                         
-                        // 合并日志
                         return {
                             ...resultState,
                             selectedCard: null
@@ -863,7 +920,6 @@ useEffect(() => {
                         newState.log = [...newState.log, `${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`];
                     }
                 } else {
-                    // 没有效果引擎，只记录使用
                     newState.log = [...newState.log, `${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`];
                 }
 
@@ -878,20 +934,26 @@ useEffect(() => {
         // 阶段切换
         // ══════════════════════════════════════════════════════════
         const endPhase = () => {
-            const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-            if (player !== gameManager.playerSide) return;
+            const phase = gameStateRef.current.phase;
+            const player = (phase === 'redDeploy' || phase === 'redSupport') ? 'red' : 'blue';
+            if (player !== gameManagerRef.current.playerSide) return;
 
-            gameManager.sendMessage({ type: 'end-phase' });
-            handleRemoteEndPhase();
+            gameManagerRef.current.sendMessage({ type: 'end-phase' });
+            doEndPhase();
         };
 
         const handleRemoteEndPhase = () => {
+            doEndPhase();
+        };
+
+        const doEndPhase = () => {
+            const phase = gameStateRef.current.phase;
             const next = {
                 redDeploy: 'blueDeploy',
                 blueDeploy: 'redSupport',
                 redSupport: 'battle'
             };
-            const target = next[gameState.phase];
+            const target = next[phase];
 
             if (target === 'battle') {
                 setGameState(prev => ({
@@ -919,11 +981,12 @@ useEffect(() => {
         // 战斗结算
         // ══════════════════════════════════════════════════════════
         const resolveBattle = async () => {
-            let redBF = gameState.red.battlefield.map(c => c ? {...c} : null);
-            let blueBF = gameState.blue.battlefield.map(c => c ? {...c} : null);
-            let redHP = gameState.red.health;
-            let blueHP = gameState.blue.health;
-            let discard = [...gameState.discardPile];
+            const state = gameStateRef.current;
+            let redBF = state.red.battlefield.map(c => c ? {...c} : null);
+            let blueBF = state.blue.battlefield.map(c => c ? {...c} : null);
+            let redHP = state.red.health;
+            let blueHP = state.blue.health;
+            let discard = [...state.discardPile];
             let logs = [];
 
             for (let i = 0; i < 4; i++) {
@@ -960,11 +1023,11 @@ useEffect(() => {
 
             setBattleAnimation({ active: false, lane: -1 });
 
-            let newMDeck = [...gameState.miracleDeck];
-            let redHand = [...gameState.red.hand];
-            let blueHand = [...gameState.blue.hand];
-            let redDrawn = [...gameState.red.miracleDrawn];
-            let blueDrawn = [...gameState.blue.miracleDrawn];
+            let newMDeck = [...state.miracleDeck];
+            let redHand = [...state.red.hand];
+            let blueHand = [...state.blue.hand];
+            let redDrawn = [...state.red.miracleDrawn];
+            let blueDrawn = [...state.blue.miracleDrawn];
 
             const milestones = [25, 20, 15, 10, 5];
             const drawMiracle = (hp, drawn, hand) => {
@@ -981,12 +1044,12 @@ useEffect(() => {
                 return { drawn, drewName: null };
             };
 
-            if (redHP < gameState.red.health) {
+            if (redHP < state.red.health) {
                 const res = drawMiracle(redHP, redDrawn, redHand);
                 redDrawn = res.drawn;
                 if (res.drewName) logs.push(`红方血量降至 ${redHP}，抽取奇迹牌：${res.drewName}`);
             }
-            if (blueHP < gameState.blue.health) {
+            if (blueHP < state.blue.health) {
                 const res = drawMiracle(blueHP, blueDrawn, blueHand);
                 blueDrawn = res.drawn;
                 if (res.drewName) logs.push(`蓝方血量降至 ${blueHP}，抽取奇迹牌：${res.drewName}`);
@@ -1024,18 +1087,16 @@ useEffect(() => {
             }));
 
             setTimeout(() => {
-                setGameState(prev => {
-                    if (prev.deck.length === 0 && prev.red.hand.length === 0 && prev.blue.hand.length === 0 && !winner) {
-                        const w = prev.red.health > prev.blue.health ? '红方' : (prev.blue.health > prev.red.health ? '蓝方' : '平局');
-                        setWinner(w);
-                        window.SoundManager.playSound('victory');
-                        return {
-                            ...prev,
-                            log: [...prev.log, '牌库耗尽', `${w === '平局' ? '平局' : w + '获胜'}`]
-                        };
-                    }
-                    return prev;
-                });
+                const currentState = gameStateRef.current;
+                if (currentState.deck.length === 0 && currentState.red.hand.length === 0 && currentState.blue.hand.length === 0 && !winner) {
+                    const w = currentState.red.health > currentState.blue.health ? '红方' : (currentState.blue.health > currentState.red.health ? '蓝方' : '平局');
+                    setWinner(w);
+                    window.SoundManager.playSound('victory');
+                    setGameState(prev => ({
+                        ...prev,
+                        log: [...prev.log, '牌库耗尽', `${w === '平局' ? '平局' : w + '获胜'}`]
+                    }));
+                }
             }, 100);
         };
 
@@ -1048,7 +1109,7 @@ useEffect(() => {
         };
 
         // ══════════════════════════════════════════════════════════
-        // 渲染逻辑
+        // 渲染
         // ══════════════════════════════════════════════════════════
         if (!uiReady) {
             return <div className="text-white text-center mt-40 text-xl">加载中…</div>;
@@ -1172,13 +1233,13 @@ useEffect(() => {
                         <div className="bg-gray-800 rounded-2xl p-8 shadow-2xl">
                             <div className="text-center mb-8">
                                 <h2 className="text-4xl font-bold text-white mb-2">
-                                    {gameManager.isHost ? '🏠 房间已创建' : '🚪 已加入房间'}
+                                    {gameManagerRef.current.isHost ? '🏠 房间已创建' : '🚪 已加入房间'}
                                 </h2>
                                 <div className="text-6xl font-bold text-yellow-400 my-6 tracking-widest">
                                     {roomId}
                                 </div>
                                 <p className="text-gray-300 text-lg">
-                                    {gameManager.isHost ? '将房间号分享给好友' : '等待房主开始游戏'}
+                                    {gameManagerRef.current.isHost ? '将房间号分享给好友' : '等待房主开始游戏'}
                                 </p>
                             </div>
 
@@ -1186,21 +1247,21 @@ useEffect(() => {
                                 <div className="bg-red-900/30 border-2 border-red-500 rounded-xl p-6 text-center">
                                     <div className="text-2xl mb-2">🔴</div>
                                     <div className="text-white font-bold mb-1">红方 (房主)</div>
-                                    <div className={`text-sm ${gameManager.isHost ? 'text-green-400' : (opponentConnected ? 'text-green-400' : 'text-yellow-400')}`}>
-                                        {gameManager.isHost ? '你' : (opponentConnected ? '对手已连接' : '等待中...')}
+                                    <div className={`text-sm ${gameManagerRef.current.isHost ? 'text-green-400' : (opponentConnected ? 'text-green-400' : 'text-yellow-400')}`}>
+                                        {gameManagerRef.current.isHost ? '你' : (opponentConnected ? '对手已连接' : '等待中...')}
                                     </div>
                                 </div>
                                 <div className="bg-blue-900/30 border-2 border-blue-500 rounded-xl p-6 text-center">
                                     <div className="text-2xl mb-2">🔵</div>
                                     <div className="text-white font-bold mb-1">蓝方 (加入者)</div>
-                                    <div className={`text-sm ${!gameManager.isHost ? 'text-green-400' : (opponentConnected ? 'text-green-400' : 'text-yellow-400')}`}>
-                                        {!gameManager.isHost ? '你' : (opponentConnected ? '对手已连接' : '等待中...')}
+                                    <div className={`text-sm ${!gameManagerRef.current.isHost ? 'text-green-400' : (opponentConnected ? 'text-green-400' : 'text-yellow-400')}`}>
+                                        {!gameManagerRef.current.isHost ? '你' : (opponentConnected ? '对手已连接' : '等待中...')}
                                     </div>
                                 </div>
                             </div>
 
                             <div className="flex gap-4">
-                                {gameManager.isHost && (
+                                {gameManagerRef.current.isHost && (
                                     <button
                                         onClick={handleStartGame}
                                         disabled={!opponentConnected}
@@ -1213,7 +1274,7 @@ useEffect(() => {
                                         {opponentConnected ? '开始游戏' : '等待对手...'}
                                     </button>
                                 )}
-                                {!gameManager.isHost && (
+                                {!gameManagerRef.current.isHost && (
                                     <div className="flex-1 py-4 rounded-xl font-bold text-xl text-center bg-gray-700 text-gray-300">
                                         等待房主开始游戏...
                                     </div>
@@ -1240,10 +1301,10 @@ useEffect(() => {
             );
         }
 
-        // 游戏界面 - 使用 GameUI 组件
+        // 游戏界面
         if (screen === 'game') {
             return (
-                <GameUI
+                <window.GameUI
                     gameState={gameState}
                     gamePhase={gamePhase}
                     allCards={allCards}
@@ -1260,7 +1321,7 @@ useEffect(() => {
                     onEndPhase={endPhase}
                     onReset={reset}
                     hideOpponentHand={true}
-                    myRole={gameManager.playerSide}
+                    myRole={gameManagerRef.current.playerSide}
                     extraUI={
                         <div className="fixed top-4 right-4 z-50 bg-gray-800 rounded-lg p-3 shadow-lg border-2 border-purple-500">
                             <div className="text-white text-sm">
