@@ -548,15 +548,17 @@
                 const isDone = newHand.length >= 3; // 包含初始的1张奇迹牌 + 2张选牌 = 3张
 
                 const newLog = [...prev.log, `你选择了 ${card.name}`];
-                if (isDone) {
+                if (isDone && !myPickDoneRef.current) {
+                    myPickDoneRef.current = true;
+                
                     newLog.push('--- 你的选牌已完成，等待对手... ---');
-                    // 发送选牌完成消息
-                    setTimeout(() => {
-                        gameManagerRef.current.sendMessage({ 
-                            type: 'pick-complete',
-                            side: mySide
-                        });
-                    }, 50);
+                
+                    gameManagerRef.current.sendMessage({ 
+                        type: 'pick-complete',
+                        side: mySide
+                    });
+                }
+
                 }
 
                 return {
@@ -598,38 +600,34 @@
 
         // 用于跟踪双方选牌完成状态
         const pickCompleteRef = useRef({ red: false, blue: false });
+        // 用于跟踪“我自己”是否已经完成选牌
+        const myPickDoneRef = useRef(false);
+
 
         const handleRemotePickComplete = (message) => {
-            const side = message.side;
-            console.log(`收到 ${side} 选牌完成消息`);
-            
-            pickCompleteRef.current[side] = true;
-            
-            // 检查双方是否都完成
-            const mySide = gameManagerRef.current.playerSide;
-            const myDone = gameStateRef.current[mySide].hand.length >= 3;
-            
-            console.log('选牌完成状态:', {
-                red: pickCompleteRef.current.red,
-                blue: pickCompleteRef.current.blue,
-                myDone,
-                mySide
-            });
-            
-            if (myDone && pickCompleteRef.current.red && pickCompleteRef.current.blue) {
-                console.log('双方选牌完成，开始游戏！');
-                setTimeout(() => {
-                    setGamePhase('playing');
-                    setGameState(prev => ({
-                        ...prev,
-                        initialCards: [],
-                        log: [...prev.log, '--- 双方选牌完成，游戏正式开始！---']
-                    }));
-                    // 重置选牌完成标记
-                    pickCompleteRef.current = { red: false, blue: false };
-                }, 300);
-            }
-        };
+    const side = message.side;
+    pickCompleteRef.current[side] = true;
+
+    const mySide = gameManagerRef.current.playerSide;
+
+    if (
+        myPickDoneRef.current &&
+        pickCompleteRef.current.red &&
+        pickCompleteRef.current.blue
+    ) {
+        setGamePhase('playing');
+        setGameState(prev => ({
+            ...prev,
+            initialCards: [],
+            log: [...prev.log, '--- 双方选牌完成，游戏正式开始！---']
+        }));
+
+        // 清理
+        pickCompleteRef.current = { red: false, blue: false };
+        myPickDoneRef.current = false;
+    }
+};
+
 
         const startTurn = () => {
             if (gameManagerRef.current.playerSide !== 'red') return;
