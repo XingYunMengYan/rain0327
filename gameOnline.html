@@ -385,13 +385,30 @@
 
         const canStartGame = roomPlayers.length === 2 && roomPlayers.every(p => p.ready);
 
+        // ==================== 修复后的 useEffect ====================
         useEffect(() => {
+            // 只有在房间界面且双方准备好时才触发
             if (screen === 'room' && canStartGame) {
-                const seed = Date.now();
-                gameManagerRef.current.sendMessage({ type: 'start-roulette', seed });
-                startRouletteAnimation(seed);
+                // 1. 确定谁是“房主”（通过ID排序，保证双方认定一致）
+                // 我们约定：ID 字符串排序更小的那个是房主
+                const sortedPlayers = [...roomPlayers].sort((a, b) => a.playerId.localeCompare(b.playerId));
+                const isHost = sortedPlayers[0].playerId === gameManagerRef.current.playerId;
+
+                // 2. 只有房主负责生成种子并广播
+                if (isHost) {
+                    const seed = Date.now();
+                    // 广播给对方：“嘿，用这个种子开始抽签”
+                    gameManagerRef.current.sendMessage({ type: 'start-roulette', seed });
+                    // 自己同时也开始动画
+                    startRouletteAnimation(seed);
+                    addLog('🎲 我是房主，正在进行抽签...');
+                } else {
+                    // 非房主（访客）什么都不做，等待网络消息触发 startRouletteAnimation
+                    addLog('⏳ 等待房主抽签...');
+                }
             }
-        }, [canStartGame, screen]);
+        }, [canStartGame, screen, roomPlayers]); // 注意依赖项要把 roomPlayers 加进去
+        // ==================== 修复结束 ====================
 
         const startRouletteAnimation = (seed) => {
             setShowRoulette(true);
