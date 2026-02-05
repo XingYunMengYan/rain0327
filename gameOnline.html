@@ -560,9 +560,8 @@
                 };
             });
 
-            if (gameStateRef.current[mySide].hand.length + 1 >= 3) {
-                checkBothPlayersPicked();
-            }
+            // 使用 setTimeout 确保状态更新完成后再检查
+            setTimeout(() => checkBothPlayersPicked(), 50);
         };
 
         const handleRemotePickCard = (message) => {
@@ -588,15 +587,32 @@
                 };
             });
 
+            // 确保状态更新后再检查
             setTimeout(() => checkBothPlayersPicked(), 100);
         };
 
+        const checkingRef = useRef(false);
+
         const checkBothPlayersPicked = () => {
+            // 防止重复检查
+            if (checkingRef.current) return;
+            
             const state = gameStateRef.current;
             const redDone = state.red.hand.length >= 3;
             const blueDone = state.blue.hand.length >= 3;
 
+            console.log('检查选牌状态:', {
+                redHandCount: state.red.hand.length,
+                blueHandCount: state.blue.hand.length,
+                redDone,
+                blueDone,
+                gamePhase: gamePhase
+            });
+
             if (redDone && blueDone) {
+                checkingRef.current = true;
+                console.log('双方选牌完成，准备开始游戏');
+                
                 setTimeout(() => {
                     setGamePhase('playing');
                     setGameState(prev => ({
@@ -604,6 +620,7 @@
                         initialCards: [],
                         log: [...prev.log, '--- 双方选牌完成，游戏正式开始！---']
                     }));
+                    checkingRef.current = false;
                 }, 500);
             }
         };
