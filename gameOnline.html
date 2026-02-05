@@ -177,7 +177,7 @@
         const [gamePhase, setGamePhase] = useState('notStarted');
         const [winner, setWinner] = useState(null);
         const [battleAnimation, setBattleAnimation] = useState({ active: false, lane: -1 });
-        const [cardShowOverlay, setCardShowOverlay] = useState(null);
+        const [cardShowOverlay, setCardShowOverlay] = useState({ visible: false, card: null, message: '' });
 
         useEffect(() => {
             gameStateRef.current = gameState;
@@ -215,10 +215,10 @@
         }, []);
 
         const showCardOverlay = useCallback((card) => {
-            setCardShowOverlay(card);
+            setCardShowOverlay({ visible: true, card, message: '' });
             const dur = card.type === 'miracle' ? 2000 : 1000;
             window.SoundManager.playSound(card.type === 'miracle' ? 'miracle' : 'place');
-            setTimeout(() => setCardShowOverlay(null), dur);
+            setTimeout(() => setCardShowOverlay({ visible: false, card: null, message: '' }), dur);
         }, []);
 
         const handleReconnect = () => {
@@ -315,7 +315,7 @@
                 case 'player-reconnect':
                     addLog(`${message.playerSide === 'red' ? '红方' : '蓝方'}已重新连接`);
                     break;
-               case 'pick-card': handleRemotePickCard(message); break;
+                case 'pick-card': handleRemotePickCard(message.card); break;
                 case 'play-card': handleRemotePlayCard(message.card, message.laneIndex); break;
                 case 'use-support': handleRemoteUseSupport(message.card, message.targetPlayer, message.laneIndex); break;
                 case 'confirm-use': handleRemoteConfirmUse(message.card); break;
@@ -474,21 +474,23 @@
                 blue: { ...INIT_STATE.blue, hand: blueM ? [blueM] : [] },
                 deck: rest,
                 miracleDeck: mDeck,
+                // 【修改点】：确保键名与 UI 渲染时一致
                 redInitialPool: redSix,
                 blueInitialPool: blueSix,
                 log: [
                     '🌐 在线游戏开始！',
                     `你是${gameManagerRef.current.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}`,
-                    '双方同时进行秘密选牌...',
-                    '--- 选牌阶段 ---'
+                    '双方各抽取1张奇迹牌',
+                    '--- 选牌阶段开始 ---'
                 ]
             });
-            setGamePhase('picking'); 
+            setGamePhase('Picking');
             setScreen('game');
         };
 
-        const pickCard = (card) => {
-            if (gamePhase !== 'picking') return;
+        // 游戏操作函数（简化版，保留核心逻辑）
+       const pickCard = (card) => {
+            if (gamePhase !== 'Picking') return;
             const mySide = gameManagerRef.current.playerSide;
             window.SoundManager.playSound('click');
             
@@ -522,15 +524,10 @@
                 const isOpponentDone = newHand.length >= 4;
                 const mySide = gameManagerRef.current.playerSide;
                 const myPoolKey = mySide === 'red' ? 'redInitialPool' : 'blueInitialPool';
-                
-                // 检查我自己是否也选完了
-                const amIDone = prev[mySide].hand.length >= 4 || prev[myPoolKey].length === 0;
+                const amIDone = prev[myPoolKey].length === 0;
 
                 if (isOpponentDone && amIDone) {
-                    setTimeout(() => {
-                        setGamePhase('playing');
-                        setGameState(s => ({...s, log: [...s.log, '双方选牌完成 → 游戏开始！']}));
-                    }, 500);
+                    setTimeout(() => setGamePhase('playing'), 500);
                 }
 
                 return {
