@@ -11,6 +11,7 @@
     <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
     <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.7.4.0.js"></script>
     <script src="shared.js"></script>
+    <script src="cardEffects.js"></script>
 </head>
 <body>
     <div id="root"></div>
@@ -27,6 +28,62 @@
     };
 
     // ══════════════════════════════════════════════════════════
+    // 断线重连 - LocalStorage 管理
+    // ══════════════════════════════════════════════════════════
+    const ReconnectManager = {
+        STORAGE_KEY: 'cardgame_online_session',
+        
+        saveSession(data) {
+            try {
+                localStorage.setItem(this.STORAGE_KEY, JSON.stringify({
+                    ...data,
+                    timestamp: Date.now()
+                }));
+                console.log('[ReconnectManager] 会话已保存');
+            } catch (e) {
+                console.error('[ReconnectManager] 保存失败:', e);
+            }
+        },
+        
+        loadSession() {
+            try {
+                const data = localStorage.getItem(this.STORAGE_KEY);
+                if (!data) return null;
+                
+                const session = JSON.parse(data);
+                const age = Date.now() - session.timestamp;
+                
+                // 会话有效期：30分钟
+                if (age > 30 * 60 * 1000) {
+                    console.log('[ReconnectManager] 会话已过期');
+                    this.clearSession();
+                    return null;
+                }
+                
+                console.log('[ReconnectManager] 找到有效会话');
+                return session;
+            } catch (e) {
+                console.error('[ReconnectManager] 加载失败:', e);
+                return null;
+            }
+        },
+        
+        clearSession() {
+            localStorage.removeItem(this.STORAGE_KEY);
+            console.log('[ReconnectManager] 会话已清除');
+        },
+        
+        updateGameState(gameState, gamePhase) {
+            const session = this.loadSession();
+            if (session) {
+                session.gameState = gameState;
+                session.gamePhase = gamePhase;
+                this.saveSession(session);
+            }
+        }
+    };
+
+    // ══════════════════════════════════════════════════════════
     // 在线游戏管理器
     // ══════════════════════════════════════════════════════════
     class OnlineGameManager {
@@ -38,14 +95,17 @@
             this.isHost = false;
             this.onMessageCallback = null;
             this.onPresenceCallback = null;
+            this.heartbeatInterval = null;
         }
 
-        init() {
-            this.playerId = 'player_' + Math.random().toString(36).substr(2, 9);
+        init(existingPlayerId = null) {
+            this.playerId = existingPlayerId || 'player_' + Math.random().toString(36).substr(2, 9);
             this.pubnub = new PubNub({
                 ...PUBNUB_CONFIG,
                 uuid: this.playerId,
+                heartbeatInterval: 10  // 10秒心跳
             });
+            console.log('[GameManager] 初始化，playerId:', this.playerId);
         }
 
         createRoom() {
@@ -53,6 +113,7 @@
             this.isHost = true;
             this.playerSide = 'red';
             this.subscribeToRoom();
+            this.startHeartbeat();
             return this.roomId;
         }
 
@@ -61,7 +122,22 @@
             this.isHost = false;
             this.playerSide = 'blue';
             this.subscribeToRoom();
+            this.startHeartbeat();
             this.sendMessage({ type: 'player-joined', playerId: this.playerId });
+        }
+
+        rejoinRoom(roomId, isHost, playerSide) {
+            console.log('[GameManager] 重新加入房间:', roomId, '身份:', playerSide);
+            this.roomId = roomId;
+            this.isHost = isHost;
+            this.playerSide = playerSide;
+            this.subscribeToRoom();
+            this.startHeartbeat();
+            this.sendMessage({ 
+                type: 'player-rejoined', 
+                playerId: this.playerId,
+                playerSide: this.playerSide
+            });
         }
 
         subscribeToRoom() {
@@ -74,6 +150,7 @@
                     }
                 },
                 presence: (event) => {
+                    console.log('[Presence] 事件:', event.action, 'uuid:', event.uuid, 'occupancy:', event.occupancy);
                     if (this.onPresenceCallback) {
                         this.onPresenceCallback(event);
                     }
@@ -84,11 +161,14 @@
                 channels: [this.roomId],
                 withPresence: true
             });
+
+            console.log('[GameManager] 已订阅房间:', this.roomId);
         }
 
         sendMessage(message) {
             if (!this.pubnub || !this.roomId) return;
             
+            console.log('[GameManager] 发送消息:', message.type);
             this.pubnub.publish({
                 channel: this.roomId,
                 message: {
@@ -99,8 +179,19 @@
             });
         }
 
+        startHeartbeat() {
+            // 每30秒发送一次心跳
+            this.heartbeatInterval = setInterval(() => {
+                this.sendMessage({ type: 'heartbeat' });
+            }, 30000);
+        }
+
         leaveRoom() {
+            if (this.heartbeatInterval) {
+                clearInterval(this.heartbeatInterval);
+            }
             if (this.pubnub && this.roomId) {
+                this.sendMessage({ type: 'player-left' });
                 this.pubnub.unsubscribe({
                     channels: [this.roomId]
                 });
@@ -151,6 +242,8 @@
         const [roomInput, setRoomInput] = useState('');
         const [gameManager] = useState(() => new OnlineGameManager());
         const [opponentConnected, setOpponentConnected] = useState(false);
+        const [showReconnectPrompt, setShowReconnectPrompt] = useState(false);
+        const [reconnectData, setReconnectData] = useState(null);
 
         // 游戏状态
         const [gameState, setGameState] = useState(INIT_STATE);
@@ -158,6 +251,48 @@
         const [winner, setWinner] = useState(null);
         const [battleAnimation, setBattleAnimation] = useState({ active: false, lane: -1 });
         const [cardShowOverlay, setCardShowOverlay] = useState(null);
+
+        // ══════════════════════════════════════════════════════════
+        // 断线重连 - 初始化检查
+        // ══════════════════════════════════════════════════════════
+        useEffect(() => {
+            const session = ReconnectManager.loadSession();
+            if (session && session.roomId) {
+                setReconnectData(session);
+                setShowReconnectPrompt(true);
+            }
+        }, []);
+
+        const handleReconnect = () => {
+            if (!reconnectData) return;
+            
+            console.log('[Reconnect] 重连到房间:', reconnectData.roomId);
+            gameManager.init(reconnectData.playerId);
+            gameManager.rejoinRoom(
+                reconnectData.roomId,
+                reconnectData.isHost,
+                reconnectData.playerSide
+            );
+            
+            setRoomId(reconnectData.roomId);
+            setGameState(reconnectData.gameState || INIT_STATE);
+            setGamePhase(reconnectData.gamePhase || 'notStarted');
+            
+            if (reconnectData.gamePhase === 'notStarted') {
+                setScreen('lobby');
+            } else {
+                setScreen('game');
+            }
+            
+            setShowReconnectPrompt(false);
+            window.SoundManager.playSound('click');
+        };
+
+        const handleNewGame = () => {
+            ReconnectManager.clearSession();
+            setShowReconnectPrompt(false);
+            window.SoundManager.playSound('click');
+        };
 
         const addLog = useCallback((msg) => { 
             setGameState(prev => ({ ...prev, log: [...prev.log, msg] })); 
@@ -171,10 +306,29 @@
         }, []);
 
         // ══════════════════════════════════════════════════════════
+        // 自动保存游戏状态
+        // ══════════════════════════════════════════════════════════
+        useEffect(() => {
+            if (screen === 'game' || screen === 'lobby') {
+                ReconnectManager.saveSession({
+                    roomId,
+                    playerId: gameManager.playerId,
+                    playerSide: gameManager.playerSide,
+                    isHost: gameManager.isHost,
+                    gameState,
+                    gamePhase,
+                    screen
+                });
+            }
+        }, [gameState, gamePhase, screen, roomId]);
+
+        // ══════════════════════════════════════════════════════════
         // 网络消息处理
         // ══════════════════════════════════════════════════════════
         useEffect(() => {
-            gameManager.init();
+            if (!reconnectData) {
+                gameManager.init();
+            }
             return () => {
                 gameManager.leaveRoom();
             };
@@ -186,13 +340,19 @@
             });
 
             gameManager.setPresenceCallback((event) => {
-                if (event.action === 'join' && event.uuid !== gameManager.playerId) {
-                    setOpponentConnected(true);
-                    window.SoundManager.playSound('click');
-                }
-                if (event.action === 'leave') {
-                    setOpponentConnected(false);
-                    addLog('⚠️ 对手已离开房间');
+                console.log('[Presence处理] action:', event.action, 'uuid:', event.uuid, '我的uuid:', gameManager.playerId);
+                
+                // 修复：正确判断对手连接状态
+                if (event.uuid !== gameManager.playerId) {
+                    if (event.action === 'join' || event.action === 'state-change') {
+                        console.log('[Presence处理] 对手上线');
+                        setOpponentConnected(true);
+                        window.SoundManager.playSound('click');
+                    } else if (event.action === 'leave' || event.action === 'timeout') {
+                        console.log('[Presence处理] 对手离线');
+                        setOpponentConnected(false);
+                        addLog('⚠️ 对手已离开房间');
+                    }
                 }
             });
         }, [screen, gameState, gamePhase]);
@@ -202,20 +362,34 @@
 
             switch (message.type) {
                 case 'player-joined':
+                case 'player-rejoined':
+                    console.log('[消息处理] 玩家加入/重连');
                     setOpponentConnected(true);
                     window.SoundManager.playSound('click');
+                    if (message.type === 'player-rejoined') {
+                        addLog('对手已重新连接');
+                    }
+                    break;
+                
+                case 'player-left':
+                    console.log('[消息处理] 玩家离开');
+                    setOpponentConnected(false);
+                    addLog('⚠️ 对手已离开房间');
+                    break;
+                
+                case 'heartbeat':
+                    // 心跳消息，静默处理
+                    setOpponentConnected(true);
                     break;
                 
                 case 'start-game':
                     console.log('📨 处理 start-game，isHost:', gameManager.isHost);
-                // ✅ 修复：二号玩家也要切换到游戏界面
-                if (!gameManager.isHost) {
-                    console.log('二号玩家收到 start-game，seed:', message.seed);
-                    initializeGame(message.seed);  // 这会自动调用 setScreen('game')
-                }
-            break;
+                    if (!gameManager.isHost) {
+                        console.log('二号玩家收到 start-game，seed:', message.seed);
+                        initializeGame(message.seed);
+                    }
+                    break;
 
-                
                 case 'pick-card':
                     handleRemotePickCard(message.card);
                     break;
@@ -238,6 +412,16 @@
 
                 case 'start-turn':
                     handleRemoteStartTurn();
+                    break;
+
+                case 'sync-state':
+                    // 状态同步（用于断线重连后同步）
+                    if (message.gameState && message.gamePhase) {
+                        console.log('[同步] 收到状态同步');
+                        setGameState(message.gameState);
+                        setGamePhase(message.gamePhase);
+                        if (message.winner) setWinner(message.winner);
+                    }
                     break;
             }
         }, [gameState, gamePhase, gameManager.isHost]);
@@ -269,34 +453,35 @@
                 return;
             }
             
-              const seed = Date.now();
-                gameManager.sendMessage({ type: 'start-game', seed });  // ✅ 先发消息
-                initializeGame(seed);                                    // ✅ 再初始化自己
-                window.SoundManager.playSound('click');
+            const seed = Date.now();
+            gameManager.sendMessage({ type: 'start-game', seed });
+            initializeGame(seed);
+            window.SoundManager.playSound('click');
         };
 
         const handleBackToLobby = () => {
-            gameManager.leaveRoom();
-            setScreen('menu');
-            setRoomId('');
-            setOpponentConnected(false);
-            setGameState(INIT_STATE);
-            setGamePhase('notStarted');
-            setWinner(null);
-            window.SoundManager.playSound('click');
+            if (confirm('确定要离开游戏吗？进度将会丢失。')) {
+                gameManager.leaveRoom();
+                ReconnectManager.clearSession();
+                setScreen('menu');
+                setRoomId('');
+                setOpponentConnected(false);
+                setGameState(INIT_STATE);
+                setGamePhase('notStarted');
+                setWinner(null);
+                window.SoundManager.playSound('click');
+            }
         };
 
         // ══════════════════════════════════════════════════════════
         // 游戏初始化
         // ══════════════════════════════════════════════════════════
         const initializeGame = (seed) => {
-          
             console.log('[initializeGame] 被调用，seed:', seed, 'playerSide:', gameManager.playerSide);
-                if (!allCards.length) {
-                    console.error('[initializeGame] allCards 为空！');
-                    return;
-                }
-            if (!allCards.length) return;
+            if (!allCards.length) {
+                console.error('[initializeGame] allCards 为空！');
+                return;
+            }
 
             const seededRandom = (s) => {
                 const x = Math.sin(s++) * 10000;
@@ -346,8 +531,7 @@
         };
 
         // ══════════════════════════════════════════════════════════
-        // 游戏操作（保留核心逻辑，篇幅限制省略部分代码）
-        // 完整代码请参考上面的版本
+        // 游戏操作 - 选牌阶段
         // ══════════════════════════════════════════════════════════
         const pickCard = (card) => {
             const isMyTurn = (gamePhase === 'redPicking' && gameManager.playerSide === 'red') || 
@@ -449,7 +633,9 @@
             }
         };
 
-        // 由于篇幅限制，以下函数省略具体实现，请参考完整版本
+        // ══════════════════════════════════════════════════════════
+        // 回合开始
+        // ══════════════════════════════════════════════════════════
         const startTurn = () => {
             if (gameManager.playerSide !== 'red') return;
             gameManager.sendMessage({ type: 'start-turn' });
@@ -488,6 +674,9 @@
             }));
         };
 
+        // ══════════════════════════════════════════════════════════
+        // 卡牌操作
+        // ══════════════════════════════════════════════════════════
         const selectCard = (card, player) => {
             if (player !== gameManager.playerSide || gameState.phase === 'idle' || gameState.phase === 'battle') return;
             const isRedPhase = gameState.phase === 'redDeploy' || gameState.phase === 'redSupport';
@@ -555,6 +744,9 @@
             }));
         };
 
+        // ══════════════════════════════════════════════════════════
+        // 支援/奇迹牌使用 - 接入 CardEffects
+        // ══════════════════════════════════════════════════════════
         const useCardOnTarget = (targetPlayer, laneIndex) => {
             const card = gameState.selectedCard;
             if (!card || (card.type !== 'support' && card.type !== 'miracle')) return;
@@ -564,7 +756,10 @@
 
             const playerState = gameState[player];
             const target = gameState[targetPlayer].battlefield[laneIndex];
-            if (!target) {
+            
+            // 检查是否需要目标
+            const needsTarget = window.EffectEngine?.needsTarget(card.id) || false;
+            if (needsTarget && !target) {
                 addLog('目标位置没有单位！');
                 return;
             }
@@ -575,41 +770,25 @@
                 return;
             }
 
-            addLog(`${player === 'red' ? '红方' : '蓝方'}对 ${target.name} 使用了 ${card.name}`);
-            showCardOverlay(card);
-            gameManager.sendMessage({ type: 'use-support', card, targetPlayer, laneIndex });
+            // 发送网络消息
+            gameManager.sendMessage({ 
+                type: 'use-support', 
+                card, 
+                targetPlayer, 
+                laneIndex,
+                needsTarget 
+            });
 
-            setGameState(prev => ({
-                ...prev,
-                [player]: {
-                    ...playerState,
-                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
-                    coins: playerState.coins - cost
-                },
-                discardPile: [...prev.discardPile, card],
-                selectedCard: null
-            }));
+            // 应用效果
+            applyCardEffect(card, player, target);
         };
 
-        const handleRemoteUseSupport = (card, targetPlayer, laneIndex) => {
+        const handleRemoteUseSupport = (card, targetPlayer, laneIndex, needsTarget) => {
             const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
             if (player === gameManager.playerSide) return;
 
-            const playerState = gameState[player];
-            const target = gameState[targetPlayer].battlefield[laneIndex];
-            
-            addLog(`${player === 'red' ? '红方' : '蓝方'}对 ${target?.name || '目标'} 使用了 ${card.name}`);
-            showCardOverlay(card);
-
-            setGameState(prev => ({
-                ...prev,
-                [player]: {
-                    ...playerState,
-                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
-                    coins: playerState.coins - (card.type === 'miracle' ? 0 : card.cost)
-                },
-                discardPile: [...prev.discardPile, card]
-            }));
+            const target = needsTarget ? gameState[targetPlayer].battlefield[laneIndex] : null;
+            applyCardEffect(card, player, target);
         };
 
         const confirmUse = () => {
@@ -626,41 +805,77 @@
                 return;
             }
 
-            addLog(`${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`);
-            showCardOverlay(card);
             gameManager.sendMessage({ type: 'confirm-use', card });
-
-            setGameState(prev => ({
-                ...prev,
-                [player]: {
-                    ...playerState,
-                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
-                    coins: playerState.coins - cost
-                },
-                discardPile: [...prev.discardPile, card],
-                selectedCard: null
-            }));
+            applyCardEffect(card, player, null);
         };
 
         const handleRemoteConfirmUse = (card) => {
             const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
             if (player === gameManager.playerSide) return;
 
-            const playerState = gameState[player];
-            addLog(`${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`);
-            showCardOverlay(card);
-
-            setGameState(prev => ({
-                ...prev,
-                [player]: {
-                    ...playerState,
-                    hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
-                    coins: playerState.coins - (card.type === 'miracle' ? 0 : card.cost)
-                },
-                discardPile: [...prev.discardPile, card]
-            }));
+            applyCardEffect(card, player, null);
         };
 
+        // ══════════════════════════════════════════════════════════
+        // 卡牌效果应用（核心函数）
+        // ══════════════════════════════════════════════════════════
+        const applyCardEffect = (card, player, target) => {
+            const cost = card.type === 'miracle' ? 0 : card.cost;
+            
+            // 显示卡牌动画
+            showCardOverlay(card);
+
+            setGameState(prev => {
+                // 先扣除费用和移除手牌
+                let newState = {
+                    ...prev,
+                    [player]: {
+                        ...prev[player],
+                        hand: prev[player].hand.filter(c => c.instanceId !== card.instanceId),
+                        coins: prev[player].coins - cost
+                    },
+                    discardPile: [...prev.discardPile, card]
+                };
+
+                // 如果有效果引擎，应用效果
+                if (window.EffectEngine) {
+                    try {
+                        const context = {
+                            player: player,
+                            card: card,
+                            target: target,
+                            logCallback: (msg) => {
+                                newState.log = [...newState.log, msg];
+                            }
+                        };
+
+                        console.log('[applyCardEffect] 触发效果:', card.name, card.id);
+                        const resultState = window.EffectEngine.trigger(card.id, context, newState);
+                        
+                        // 合并日志
+                        return {
+                            ...resultState,
+                            selectedCard: null
+                        };
+                    } catch (error) {
+                        console.error('[applyCardEffect] 效果执行失败:', error);
+                        newState.log = [...newState.log, `${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`];
+                    }
+                } else {
+                    // 没有效果引擎，只记录使用
+                    newState.log = [...newState.log, `${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`];
+                }
+
+                return {
+                    ...newState,
+                    selectedCard: null
+                };
+            });
+        };
+
+        // ══════════════════════════════════════════════════════════
+        // 阶段切换
+        // ══════════════════════════════════════════════════════════
         const endPhase = () => {
             const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
             if (player !== gameManager.playerSide) return;
@@ -699,6 +914,9 @@
             }
         };
 
+        // ══════════════════════════════════════════════════════════
+        // 战斗结算
+        // ══════════════════════════════════════════════════════════
         const resolveBattle = async () => {
             let redBF = gameState.red.battlefield.map(c => c ? {...c} : null);
             let blueBF = gameState.blue.battlefield.map(c => c ? {...c} : null);
@@ -835,6 +1053,50 @@
             return <div className="text-white text-center mt-40 text-xl">加载中…</div>;
         }
 
+        // 重连提示界面
+        if (showReconnectPrompt) {
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-blue-900 flex items-center justify-center p-4">
+                    <div className="max-w-md w-full bg-gray-800 rounded-2xl p-8 shadow-2xl border-2 border-yellow-500">
+                        <div className="text-center mb-6">
+                            <div className="text-6xl mb-4">🔄</div>
+                            <h2 className="text-3xl font-bold text-white mb-2">检测到断线</h2>
+                            <p className="text-gray-300">发现未完成的游戏</p>
+                        </div>
+
+                        <div className="bg-gray-700 rounded-xl p-4 mb-6">
+                            <div className="text-sm text-gray-300 mb-2">房间号</div>
+                            <div className="text-2xl font-bold text-yellow-400 font-mono tracking-wider">
+                                {reconnectData?.roomId}
+                            </div>
+                            <div className="text-sm text-gray-400 mt-2">
+                                身份: {reconnectData?.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}
+                            </div>
+                        </div>
+
+                        <div className="grid gap-3">
+                            <button
+                                onClick={handleReconnect}
+                                className="w-full py-4 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold text-lg transition-all duration-200"
+                            >
+                                重新连接
+                            </button>
+                            <button
+                                onClick={handleNewGame}
+                                className="w-full py-4 bg-gray-600 hover:bg-gray-700 text-white rounded-xl font-bold text-lg transition-all duration-200"
+                            >
+                                开始新游戏
+                            </button>
+                        </div>
+
+                        <div className="mt-4 text-center text-xs text-gray-500">
+                            重连后将恢复游戏进度
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
         // 主菜单
         if (screen === 'menu') {
             return (
@@ -894,6 +1156,7 @@
 
                         <div className="mt-8 text-center text-gray-400 text-sm">
                             <p>💡 创建房间后，将房间号分享给好友即可开始对战</p>
+                            <p className="mt-2">🔄 支持断线重连，刷新页面不会丢失进度</p>
                         </div>
                     </div>
                 </div>
@@ -922,14 +1185,14 @@
                                 <div className="bg-red-900/30 border-2 border-red-500 rounded-xl p-6 text-center">
                                     <div className="text-2xl mb-2">🔴</div>
                                     <div className="text-white font-bold mb-1">红方 (房主)</div>
-                                    <div className={`text-sm ${gameManager.isHost ? 'text-green-400' : 'text-yellow-400'}`}>
+                                    <div className={`text-sm ${gameManager.isHost ? 'text-green-400' : (opponentConnected ? 'text-green-400' : 'text-yellow-400')}`}>
                                         {gameManager.isHost ? '你' : (opponentConnected ? '对手已连接' : '等待中...')}
                                     </div>
                                 </div>
                                 <div className="bg-blue-900/30 border-2 border-blue-500 rounded-xl p-6 text-center">
                                     <div className="text-2xl mb-2">🔵</div>
                                     <div className="text-white font-bold mb-1">蓝方 (加入者)</div>
-                                    <div className={`text-sm ${!gameManager.isHost ? 'text-green-400' : 'text-yellow-400'}`}>
+                                    <div className={`text-sm ${!gameManager.isHost ? 'text-green-400' : (opponentConnected ? 'text-green-400' : 'text-yellow-400')}`}>
                                         {!gameManager.isHost ? '你' : (opponentConnected ? '对手已连接' : '等待中...')}
                                     </div>
                                 </div>
@@ -1002,8 +1265,9 @@
                             <div className="text-white text-sm">
                                 <div className="font-bold mb-1">🌐 在线对战</div>
                                 <div className="text-yellow-400 font-mono">房间: {roomId}</div>
-                                <div className={`text-xs mt-1 ${opponentConnected ? 'text-green-400' : 'text-red-400'}`}>
-                                    {opponentConnected ? '● 对手在线' : '○ 对手离线'}
+                                <div className={`text-xs mt-1 flex items-center gap-1 ${opponentConnected ? 'text-green-400' : 'text-red-400'}`}>
+                                    <div className={`w-2 h-2 rounded-full ${opponentConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                                    {opponentConnected ? '对手在线' : '对手离线'}
                                 </div>
                             </div>
                         </div>
