@@ -207,10 +207,14 @@
                     break;
                 
                 case 'start-game':
-                    if (!gameManager.isHost) {
-                        initializeGame(message.seed);
-                    }
-                    break;
+                    console.log('📨 处理 start-game，isHost:', gameManager.isHost);
+                // ✅ 修复：二号玩家也要切换到游戏界面
+                if (!gameManager.isHost) {
+                    console.log('二号玩家收到 start-game，seed:', message.seed);
+                    initializeGame(message.seed);  // 这会自动调用 setScreen('game')
+                }
+            break;
+
                 
                 case 'pick-card':
                     handleRemotePickCard(message.card);
@@ -265,10 +269,10 @@
                 return;
             }
             
-            const seed = Date.now();
-            initializeGame(seed);
-            gameManager.sendMessage({ type: 'start-game', seed });
-            window.SoundManager.playSound('click');
+              const seed = Date.now();
+                gameManager.sendMessage({ type: 'start-game', seed });  // ✅ 先发消息
+                initializeGame(seed);                                    // ✅ 再初始化自己
+                window.SoundManager.playSound('click');
         };
 
         const handleBackToLobby = () => {
@@ -286,6 +290,12 @@
         // 游戏初始化
         // ══════════════════════════════════════════════════════════
         const initializeGame = (seed) => {
+          
+            console.log('[initializeGame] 被调用，seed:', seed, 'playerSide:', gameManager.playerSide);
+                if (!allCards.length) {
+                    console.error('[initializeGame] allCards 为空！');
+                    return;
+                }
             if (!allCards.length) return;
 
             const seededRandom = (s) => {
