@@ -441,7 +441,7 @@
             }, 1500);
         };
 
-        const initializeGameWithSeed = (seed) => {
+     const initializeGameWithSeed = (seed) => {
             if (!allCards || allCards.length === 0) return;
             const seededRandom = (s) => {
                 const x = Math.sin(s++) * 10000;
@@ -460,20 +460,23 @@
             const miracles = allCards.filter(c => c.type === 'miracle');
             const deck = seededShuffle(regular.map(window.createCard));
             const miracleDeck = seededShuffle(miracles.map(window.createCard));
+            
             const redSix = deck.slice(0, 6);
             const blueSix = deck.slice(6, 12);
             const rest = deck.slice(12);
             const mDeck = [...miracleDeck];
             const redM = mDeck.pop();
             const blueM = mDeck.pop();
+
             setGameState({
                 ...INIT_STATE,
                 red: { ...INIT_STATE.red, hand: redM ? [redM] : [] },
                 blue: { ...INIT_STATE.blue, hand: blueM ? [blueM] : [] },
                 deck: rest,
                 miracleDeck: mDeck,
-                initialCards: redSix,
-                initialCardsBlue: blueSix,
+                // 【修改点】：确保键名与 UI 渲染时一致
+                redInitialPool: redSix,
+                blueInitialPool: blueSix,
                 log: [
                     '🌐 在线游戏开始！',
                     `你是${gameManagerRef.current.playerSide === 'red' ? '红方🔴' : '蓝方🔵'}`,
@@ -481,39 +484,60 @@
                     '--- 选牌阶段开始 ---'
                 ]
             });
-            setGamePhase('redPicking');
+            setGamePhase('Picking');
             setScreen('game');
         };
 
         // 游戏操作函数（简化版，保留核心逻辑）
-        const pickCard = (card) => {
-    const phase = gamePhase;
-    if (phase !== 'picking') return; // 只有在 picking 阶段能选
-    
-    const mySide = gameManagerRef.current.playerSide;
-    window.SoundManager.playSound('click');
-    
-    // 发送给对方，告诉对方我选了哪张（用于同步状态，但对方UI不显示我的池子）
-    gameManagerRef.current.sendMessage({ type: 'pick-card', card, side: mySide });
+       const pickCard = (card) => {
+            if (gamePhase !== 'picking') return;
+            const mySide = gameManagerRef.current.playerSide;
+            window.SoundManager.playSound('click');
+            
+            // 发送给对方
+            gameManagerRef.current.sendMessage({ type: 'pick-card', card, side: mySide });
 
-    setGameState(prev => {
-        const poolKey = mySide === 'red' ? 'redInitialPool' : 'blueInitialPool';
-        const playerKey = mySide;
-        
-        const newHand = [...prev[playerKey].hand, card];
-        const newPool = prev[poolKey].filter(c => c.instanceId !== card.instanceId);
-        
-        // 检查我是否选完了
-        const isDone = newHand.length === 3; // 假设初始1张奇迹+选3张=4张
-        
-        // 如果我选完了，我的池子清空
-        return {
-            ...prev,
-            [playerKey]: { ...prev[playerKey], hand: newHand },
-            [poolKey]: isDone ? [] : newPool,
-            log: [...prev.log, `你选择了 ${card.name} (${newHand.length-1}/3)`]
+            setGameState(prev => {
+                const poolKey = mySide === 'red' ? 'redInitialPool' : 'blueInitialPool';
+                const newHand = [...prev[mySide].hand, card];
+                const newPool = prev[poolKey].filter(c => c.instanceId !== card.instanceId);
+                const isDone = newHand.length >= 4; // 1张奇迹 + 3张选牌
+
+                return {
+                    ...prev,
+                    [mySide]: { ...prev[mySide], hand: newHand },
+                    [poolKey]: isDone ? [] : newPool,
+                    log: [...prev.log, `你选择了 ${card.name}`]
+                };
+            });
         };
-    });
+
+        const handleRemotePickCard = (message) => {
+            const opponentSide = message.side;
+            const card = message.card;
+
+            setGameState(prev => {
+                const poolKey = opponentSide === 'red' ? 'redInitialPool' : 'blueInitialPool';
+                const newHand = [...prev[opponentSide].hand, card];
+                const newPool = prev[poolKey].filter(c => c.instanceId !== card.instanceId);
+                
+                const isOpponentDone = newHand.length >= 4;
+                const mySide = gameManagerRef.current.playerSide;
+                const myPoolKey = mySide === 'red' ? 'redInitialPool' : 'blueInitialPool';
+                const amIDone = prev[myPoolKey].length === 0;
+
+                if (isOpponentDone && amIDone) {
+                    setTimeout(() => setGamePhase('playing'), 500);
+                }
+
+                return {
+                    ...prev,
+                    [opponentSide]: { ...prev[opponentSide], hand: newHand },
+                    [poolKey]: isOpponentDone ? [] : newPool,
+                    log: [...prev.log, `${opponentSide === 'red' ? '红方' : '蓝方'}选了一张牌`]
+                };
+            });
+        
             } else if (phase === 'bluePicking') {
                 setGameState(prev => {
                     const newHand = [...prev.blue.hand, card];
