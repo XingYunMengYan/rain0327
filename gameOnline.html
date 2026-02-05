@@ -1184,3 +1184,9 @@
         />
     );
 }
+
+        return null; // 确保在组件内部，且是所有 screen 判断之后的兜底返回
+    }; // 这里才是 OnlineGame 组件的结束
+
+    ReactDOM.render(<OnlineGame />, document.getElementById('root'));
+    </script>
