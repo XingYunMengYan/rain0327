@@ -333,6 +333,10 @@
                     handleRemotePickCard(message);
                     break;
 
+                case 'pick-complete':
+                    handleRemotePickComplete(message);
+                    break;
+
                 case 'play-card':
                     handleRemotePlayCard(message);
                     break;
@@ -546,6 +550,13 @@
                 const newLog = [...prev.log, `你选择了 ${card.name}`];
                 if (isDone) {
                     newLog.push('--- 你的选牌已完成，等待对手... ---');
+                    // 发送选牌完成消息
+                    setTimeout(() => {
+                        gameManagerRef.current.sendMessage({ 
+                            type: 'pick-complete',
+                            side: mySide
+                        });
+                    }, 50);
                 }
 
                 return {
@@ -559,9 +570,6 @@
                     log: newLog
                 };
             });
-
-            // 使用 setTimeout 确保状态更新完成后再检查
-            setTimeout(() => checkBothPlayersPicked(), 100);
         };
 
         const handleRemotePickCard = (message) => {
@@ -586,31 +594,30 @@
                     log: [...prev.log, `${opponentSide === 'red' ? '红方' : '蓝方'}选了一张牌`]
                 };
             });
-
-            // 确保状态更新后再检查
-            setTimeout(() => checkBothPlayersPicked(), 150);
         };
 
-        const checkingRef = useRef(false);
+        // 用于跟踪双方选牌完成状态
+        const pickCompleteRef = useRef({ red: false, blue: false });
 
-        const checkBothPlayersPicked = () => {
-            const state = gameStateRef.current;
-            const redDone = state.red.hand.length >= 3; // 包含初始的1张奇迹牌 + 2张选牌 = 3张
-            const blueDone = state.blue.hand.length >= 3;
-
-            console.log('检查选牌状态:', {
-                redHandCount: state.red.hand.length,
-                blueHandCount: state.blue.hand.length,
-                redDone,
-                blueDone,
-                gamePhase: gamePhase,
-                checking: checkingRef.current
+        const handleRemotePickComplete = (message) => {
+            const side = message.side;
+            console.log(`收到 ${side} 选牌完成消息`);
+            
+            pickCompleteRef.current[side] = true;
+            
+            // 检查双方是否都完成
+            const mySide = gameManagerRef.current.playerSide;
+            const myDone = gameStateRef.current[mySide].hand.length >= 3;
+            
+            console.log('选牌完成状态:', {
+                red: pickCompleteRef.current.red,
+                blue: pickCompleteRef.current.blue,
+                myDone,
+                mySide
             });
-
-            if (redDone && blueDone && !checkingRef.current) {
-                checkingRef.current = true;
-                console.log('双方选牌完成，准备开始游戏');
-                
+            
+            if (myDone && pickCompleteRef.current.red && pickCompleteRef.current.blue) {
+                console.log('双方选牌完成，开始游戏！');
                 setTimeout(() => {
                     setGamePhase('playing');
                     setGameState(prev => ({
@@ -618,11 +625,9 @@
                         initialCards: [],
                         log: [...prev.log, '--- 双方选牌完成，游戏正式开始！---']
                     }));
-                    // 延迟重置 checkingRef，防止状态切换时重复触发
-                    setTimeout(() => {
-                        checkingRef.current = false;
-                    }, 1000);
-                }, 500);
+                    // 重置选牌完成标记
+                    pickCompleteRef.current = { red: false, blue: false };
+                }, 300);
             }
         };
 
@@ -1053,6 +1058,7 @@
             setGamePhase('notStarted');
             setBattleAnimation({ active: false, lane: -1 });
             setGameState(INIT_STATE);
+            pickCompleteRef.current = { red: false, blue: false };
             gameManagerRef.current.isReady = false;
             setRoomPlayers(prev => prev.map(p => ({ ...p, ready: false })));
             setScreen('room');
