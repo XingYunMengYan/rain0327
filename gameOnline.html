@@ -608,6 +608,11 @@
     const side = message.side;
     pickCompleteRef.current[side] = true;
 
+            const myDone =
+    myPickDoneRef.current ||
+    gameStateRef.current[mySide].hand.length >= 3;
+
+
     const mySide = gameManagerRef.current.playerSide;
 
     if (
@@ -1052,6 +1057,9 @@
         };
 
         const reset = () => {
+                myPickDoneRef.current = false;
+    pickCompleteRef.current = { red: false, blue: false };
+
             setWinner(null);
             setGamePhase('notStarted');
             setBattleAnimation({ active: false, lane: -1 });
