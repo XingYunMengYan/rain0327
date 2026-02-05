@@ -315,7 +315,7 @@
                 case 'player-reconnect':
                     addLog(`${message.playerSide === 'red' ? '红方' : '蓝方'}已重新连接`);
                     break;
-                case 'pick-card': handleRemotePickCard(message.card); break;
+                case 'pick-card': handleRemotePickCard(message); break;
                 case 'play-card': handleRemotePlayCard(message.card, message.laneIndex); break;
                 case 'use-support': handleRemoteUseSupport(message.card, message.targetPlayer, message.laneIndex); break;
                 case 'confirm-use': handleRemoteConfirmUse(message.card); break;
@@ -484,13 +484,14 @@
                     '--- 选牌阶段开始 ---'
                 ]
             });
-            setGamePhase('Picking');
+            const mySide = gameManagerRef.current.playerSide;
+            setGamePhase(mySide === 'red' ? 'redPicking' : 'bluePicking');
             setScreen('game');
         };
 
         // 游戏操作函数（简化版，保留核心逻辑）
        const pickCard = (card) => {
-            if (gamePhase !== 'Picking') return;
+            if (gamePhase !== 'redPicking' && gamePhase !== 'bluePicking') return;
             const mySide = gameManagerRef.current.playerSide;
             window.SoundManager.playSound('click');
             
@@ -501,13 +502,18 @@
                 const poolKey = mySide === 'red' ? 'redInitialPool' : 'blueInitialPool';
                 const newHand = [...prev[mySide].hand, card];
                 const newPool = prev[poolKey].filter(c => c.instanceId !== card.instanceId);
-                const isDone = newHand.length >= 4; // 1张奇迹 + 3张选牌
+                const isDone = newHand.length >= 3; // 1张奇迹 + 2张选牌
+
+                const newLog = [...prev.log, `你选择了 ${card.name}`];
+                if (isDone) {
+                    newLog.push('--- 你的选牌已完成，等待对手... ---');
+                }
 
                 return {
                     ...prev,
                     [mySide]: { ...prev[mySide], hand: newHand },
                     [poolKey]: isDone ? [] : newPool,
-                    log: [...prev.log, `你选择了 ${card.name}`]
+                    log: newLog
                 };
             });
         };
@@ -521,13 +527,19 @@
                 const newHand = [...prev[opponentSide].hand, card];
                 const newPool = prev[poolKey].filter(c => c.instanceId !== card.instanceId);
                 
-                const isOpponentDone = newHand.length >= 4;
+                const isOpponentDone = newHand.length >= 3; // 1张奇迹 + 2张选牌
                 const mySide = gameManagerRef.current.playerSide;
                 const myPoolKey = mySide === 'red' ? 'redInitialPool' : 'blueInitialPool';
                 const amIDone = prev[myPoolKey].length === 0;
 
                 if (isOpponentDone && amIDone) {
-                    setTimeout(() => setGamePhase('playing'), 500);
+                    setTimeout(() => {
+                        setGamePhase('playing');
+                        setGameState(prev => ({
+                            ...prev,
+                            log: [...prev.log, '--- 双方选牌完成，游戏正式开始！---']
+                        }));
+                    }, 500);
                 }
 
                 return {
