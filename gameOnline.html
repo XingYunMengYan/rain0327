@@ -1113,56 +1113,74 @@
         }
 
       if (screen === 'game') {
-            if (!window.GameUI) {
-                return <div className="text-white text-center mt-40 text-xl">游戏UI未加载…</div>;
-            }
+    if (!window.GameUI) {
+        return <div className="text-white text-center mt-40 text-xl">游戏UI未加载…</div>;
+    }
 
-            // 1. 获取当前玩家身份和对手状态
-            const mySide = gameManagerRef.current?.playerSide;
-            const opponentOnline = roomPlayers.length === 2;
+    const mySide = gameManagerRef.current?.playerSide;
 
-            // 2. 【关键修改】：构造用于显示的 displayGameState
-            // 确保在选牌阶段，UI 只拿到属于当前玩家的那份候选牌池（initialCards）
-            const displayGameState = {
-                ...gameState,
-                initialCards: mySide === 'red' ? gameState.redInitialPool : gameState.blueInitialPool
-            };
+    // 防止 gameState 为空
+    if (!gameState) return null;
 
-            // 3. 统一返回一个完整的 GameUI，包含过滤后的状态和所有的业务回调
-            return (
-                <window.GameUI
-                    gameState={displayGameState} // 使用过滤后的显示状态
-                    gamePhase={gamePhase}
-                    allCards={allCards}
-                    winner={winner}
-                    battleAnimation={battleAnimation}
-                    cardShowOverlay={cardShowOverlay}
-                    onStartPicking={() => {}}
-                    onPickCard={pickCard}
-                    onStartTurn={startTurn}
-                    onSelectCard={selectCard}
-                    onPlayCard={playCard}
-                    onUseCardOnTarget={useCardOnTarget}
-                    onConfirmUse={confirmUse}
-                    onEndPhase={endPhase}
-                    onReset={reset}
-                    hideOpponentHand={true}
-                    myRole={mySide}
-                    extraUI={
-                        <div className="fixed top-4 right-4 z-50 bg-gray-800 rounded-lg p-3 shadow-lg border-2 border-purple-500">
-                            <div className="text-white text-sm">
-                                <div className="font-bold mb-1">🌐 在线对战</div>
-                                <div className="text-yellow-400 font-mono text-xs">房间: {currentRoomId?.toUpperCase()}</div>
-                                <div className={`text-xs mt-1 flex items-center gap-1 ${opponentOnline ? 'text-green-400' : 'text-red-400'}`}>
-                                    <div className={`w-2 h-2 rounded-full ${opponentOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-                                    {opponentOnline ? '对手在线' : '对手离线'}
-                                </div>
-                                <button onClick={handleBackToLobby} className="mt-2 w-full px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition-all">
-                                    退出游戏
-                                </button>
-                            </div>
+    const displayGameState = {
+        ...gameState,
+        initialCards:
+            mySide === 'red'
+                ? gameState.redInitialPool
+                : gameState.blueInitialPool
+    };
+
+    const opponentOnline = roomPlayers.length === 2;
+
+    return (
+        <window.GameUI
+            gameState={displayGameState}
+            gamePhase={gamePhase}
+            allCards={allCards}
+            winner={winner}
+            battleAnimation={battleAnimation}
+            cardShowOverlay={cardShowOverlay}
+            onStartPicking={() => {}}
+            onPickCard={pickCard}
+            onStartTurn={startTurn}
+            onSelectCard={selectCard}
+            onPlayCard={playCard}
+            onUseCardOnTarget={useCardOnTarget}
+            onConfirmUse={confirmUse}
+            onEndPhase={endPhase}
+            onReset={reset}
+            hideOpponentHand={true}
+            myRole={mySide}
+            extraUI={
+                <div className="fixed top-4 right-4 z-50 bg-gray-800 rounded-lg p-3 shadow-lg border-2 border-purple-500">
+                    <div className="text-white text-sm">
+                        <div className="font-bold mb-1">🌐 在线对战</div>
+                        <div className="text-yellow-400 font-mono text-xs">
+                            房间: {currentRoomId?.toUpperCase()}
                         </div>
-                    }
-                />
-            );
-        }
+                        <div
+                            className={`text-xs mt-1 flex items-center gap-1 ${
+                                opponentOnline ? 'text-green-400' : 'text-red-400'
+                            }`}
+                        >
+                            <div
+                                className={`w-2 h-2 rounded-full ${
+                                    opponentOnline
+                                        ? 'bg-green-500 animate-pulse'
+                                        : 'bg-red-500'
+                                }`}
+                            ></div>
+                            {opponentOnline ? '对手在线' : '对手离线'}
+                        </div>
+                        <button
+                            onClick={handleBackToLobby}
+                            className="mt-2 w-full px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition-all"
+                        >
+                            退出游戏
+                        </button>
+                    </div>
+                </div>
+            }
+        />
+    );
+}
