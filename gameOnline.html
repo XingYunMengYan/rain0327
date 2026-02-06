@@ -203,6 +203,10 @@
         const [battleAnimation, setBattleAnimation] = useState({ active: false, lane: -1 });
         const [cardShowOverlay, setCardShowOverlay] = useState(null);
 
+        // 🔑 关键修复：用 ref 记录选牌完成计数（而非依赖异步state）
+        const myPickCountRef = useRef(0); // 我选了几张牌（不包括初始奇迹牌）
+        const opponentPickedRef = useRef(false); // 对手是否完成选牌
+
         useEffect(() => {
             gameStateRef.current = gameState;
         }, [gameState]);
@@ -496,6 +500,10 @@
 
             const mySide = gameManagerRef.current.playerSide;
 
+            // 🔑 重置选牌计数器
+            myPickCountRef.current = 0;
+            opponentPickedRef.current = false;
+
             setGameState({
                 ...INIT_STATE,
                 red: { 
@@ -523,6 +531,30 @@
             setScreen('game');
         };
 
+        // 🔑 检查双方是否都完成（在任何时候都可以调用）
+        const tryStartGame = useCallback(() => {
+            console.log('检查是否可以开始游戏:', {
+                myPickCount: myPickCountRef.current,
+                opponentPicked: opponentPickedRef.current
+            });
+
+            // 🎯 核心判断：我选了2张 && 对手发了完成消息
+            if (myPickCountRef.current >= 2 && opponentPickedRef.current) {
+                console.log('✅ 双方都完成，开始游戏！');
+                
+                setGamePhase('playing');
+                setGameState(prev => ({
+                    ...prev,
+                    initialCards: [],
+                    log: [...prev.log, '--- 双方选牌完成，游戏正式开始！---']
+                }));
+                
+                // 重置标记，防止重复触发
+                myPickCountRef.current = -999;
+                opponentPickedRef.current = false;
+            }
+        }, []);
+
         const pickCard = (card) => {
             const currentPhase = gamePhase;
             if (currentPhase !== 'redPicking' && currentPhase !== 'bluePicking') return;
@@ -534,29 +566,41 @@
             if (!correctPhase) return;
 
             window.SoundManager.playSound('click');
+
+            // 🔑 立即更新计数器（同步的！）
+            myPickCountRef.current += 1;
+            const newCount = myPickCountRef.current;
+
+            console.log(`选了第 ${newCount} 张牌:`, card.name);
             
+            // 发送选牌消息
             gameManagerRef.current.sendMessage({ 
                 type: 'pick-card', 
                 cardId: card.instanceId,
                 side: mySide
             });
 
+            // 如果选满2张，立即发送完成消息
+            if (newCount >= 2) {
+                console.log('我的选牌已完成，发送完成消息');
+                gameManagerRef.current.sendMessage({ 
+                    type: 'pick-complete',
+                    side: mySide
+                });
+                // 立即检查对手是否也完成了
+                tryStartGame();
+            }
+
+            // 更新UI状态（异步的，但不影响判断逻辑）
             setGameState(prev => {
                 const newHand = [...prev[mySide].hand, card];
                 const newPool = prev[mySide].pickPool.filter(c => c.instanceId !== card.instanceId);
                 const newInitialCards = prev.initialCards.filter(c => c.instanceId !== card.instanceId);
-                const isDone = newHand.length >= 3; // 包含初始的1张奇迹牌 + 2张选牌 = 3张
+                const isDone = newCount >= 2;
 
                 const newLog = [...prev.log, `你选择了 ${card.name}`];
                 if (isDone) {
                     newLog.push('--- 你的选牌已完成，等待对手... ---');
-                    // 发送选牌完成消息
-                    setTimeout(() => {
-                        gameManagerRef.current.sendMessage({ 
-                            type: 'pick-complete',
-                            side: mySide
-                        });
-                    }, 50);
                 }
 
                 return {
@@ -582,7 +626,7 @@
 
                 const newHand = [...prev[opponentSide].hand, card];
                 const newPool = prev[opponentSide].pickPool.filter(c => c.instanceId !== cardId);
-                const isOpponentDone = newHand.length >= 3; // 包含初始的1张奇迹牌 + 2张选牌 = 3张
+                const isOpponentDone = newHand.length >= 3;
 
                 return {
                     ...prev,
@@ -596,40 +640,15 @@
             });
         };
 
-        // 用于跟踪双方选牌完成状态
-        const pickCompleteRef = useRef({ red: false, blue: false });
-
-        const handleRemotePickComplete = (message) => {
-            const side = message.side;
-            console.log(`收到 ${side} 选牌完成消息`);
+        const handleRemotePickComplete = useCallback((message) => {
+            console.log('收到对手选牌完成消息:', message.side);
             
-            pickCompleteRef.current[side] = true;
+            // 🔑 标记对手已完成（同步的！）
+            opponentPickedRef.current = true;
             
-            // 检查双方是否都完成
-            const mySide = gameManagerRef.current.playerSide;
-            const myDone = gameStateRef.current[mySide].hand.length >= 3;
-            
-            console.log('选牌完成状态:', {
-                red: pickCompleteRef.current.red,
-                blue: pickCompleteRef.current.blue,
-                myDone,
-                mySide
-            });
-            
-            if (myDone && pickCompleteRef.current.red && pickCompleteRef.current.blue) {
-                console.log('双方选牌完成，开始游戏！');
-                setTimeout(() => {
-                    setGamePhase('playing');
-                    setGameState(prev => ({
-                        ...prev,
-                        initialCards: [],
-                        log: [...prev.log, '--- 双方选牌完成，游戏正式开始！---']
-                    }));
-                    // 重置选牌完成标记
-                    pickCompleteRef.current = { red: false, blue: false };
-                }, 300);
-            }
-        };
+            // 立即检查是否可以开始游戏
+            tryStartGame();
+        }, [tryStartGame]);
 
         const startTurn = () => {
             if (gameManagerRef.current.playerSide !== 'red') return;
@@ -1058,7 +1077,8 @@
             setGamePhase('notStarted');
             setBattleAnimation({ active: false, lane: -1 });
             setGameState(INIT_STATE);
-            pickCompleteRef.current = { red: false, blue: false };
+            myPickCountRef.current = 0;
+            opponentPickedRef.current = false;
             gameManagerRef.current.isReady = false;
             setRoomPlayers(prev => prev.map(p => ({ ...p, ready: false })));
             setScreen('room');
