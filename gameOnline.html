@@ -1259,17 +1259,17 @@
                     hideOpponentHand={true}
                     myRole={mySide}
                     extraUI={
-                        <div className="fixed top-4 right-4 z-50 bg-gray-800 rounded-lg p-3 shadow-lg border-2 border-purple-500">
-                            <div className="text-white text-sm">
+                        <div className="fixed bottom-4 left-4 md:top-4 md:bottom-auto md:right-4 md:left-auto z-50 bg-gray-800 rounded-lg p-2 md:p-3 shadow-lg border-2 border-purple-500">
+                            <div className="text-white text-xs md:text-sm">
                                 <div className="font-bold mb-1">🌐 在线对战</div>
-                                <div className="text-yellow-400 font-mono text-xs">
+                                <div className="text-yellow-400 font-mono text-[10px] md:text-xs">
                                     房间: {currentRoomId?.toUpperCase()}
                                 </div>
-                                <div className={`text-xs mt-1 flex items-center gap-1 ${opponentOnline ? 'text-green-400' : 'text-red-400'}`}>
+                                <div className={`text-[10px] md:text-xs mt-1 flex items-center gap-1 ${opponentOnline ? 'text-green-400' : 'text-red-400'}`}>
                                     <div className={`w-2 h-2 rounded-full ${opponentOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
                                     {opponentOnline ? '对手在线' : '对手离线'}
                                 </div>
-                                <button onClick={handleBackToLobby} className="mt-2 w-full px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-xs transition-all">
+                                <button onClick={handleBackToLobby} className="mt-2 w-full px-2 py-1 bg-red-600 hover:bg-red-700 rounded text-[10px] md:text-xs transition-all">
                                     退出游戏
                                 </button>
                             </div>
