@@ -13,6 +13,9 @@ window.SoundManager = {
   isMuted: false,
   bgmEnabled: false,
   bgmTimeout: null,
+   currentBGMSource: null,
+  bgmFiles: ['bgm/bgm1.mp3', 'bgm/bgm2.mp3', 'bgm/bgm3.mp3', 'bgm/bgm4.mp3', 'bgm/bgm5.mp3'],
+  lastPlayedIndex: -1,
 
   init() {
     if (!this.context) {
@@ -62,7 +65,7 @@ window.SoundManager = {
     // 轮盘转动噗声
     if (type === 'spin') {
       const ctx2 = this.context;
-      const buf  = ctx2.createBuffer(1, ctx2.sampleRate * 0.05, ctx2.sampleRate);
+      const buf  = ctx2.createBuffer(1, ctx2.sampleRate * 0.1, ctx2.sampleRate);
       const d    = buf.getChannelData(0);
       for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * (1 - i/d.length);
       const src  = ctx2.createBufferSource();
@@ -98,44 +101,65 @@ window.SoundManager = {
     osc.stop(ctx.currentTime + p.dur);
   },
 
-  toggleBGM() {
+    toggleBGM() {
     this.bgmEnabled = !this.bgmEnabled;
     this.bgmEnabled ? this.playBGM() : this.stopBGM();
     localStorage.setItem('bgmEnabled', this.bgmEnabled);
   },
 
-  playBGM() {
+  async playBGM() {
     if (this.isMuted || !this.bgmEnabled) return;
     this.init();
-    if (this.bgmTimeout) this.stopBGM();
+    
+    // 随机选择一首BGM（避免重复播放同一首）
+    let randomIndex;
+    do {
+      randomIndex = Math.floor(Math.random() * this.bgmFiles.length);
+    } while (randomIndex === this.lastPlayedIndex && this.bgmFiles.length > 1);
+    
+    this.lastPlayedIndex = randomIndex;
+    const bgmPath = this.bgmFiles[randomIndex];
 
-    const ctx   = this.context;
-    const master = ctx.createGain();
-    master.gain.value = 0.05;
-    master.connect(ctx.destination);
+    try {
+      // 加载音频文件
+      const response = await fetch(bgmPath);
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await this.context.decodeAudioData(arrayBuffer);
 
-    const notes = [261.63, 329.63, 392.00, 523.25]; // C4 E4 G4 C5
-    let step = 0;
+      // 创建音频源
+      const source = this.context.createBufferSource();
+      const gainNode = this.context.createGain();
+      
+      source.buffer = audioBuffer;
+      gainNode.gain.value = 0.1; // 音量
+      
+      source.connect(gainNode);
+      gainNode.connect(this.context.destination);
 
-    const tick = () => {
-      if (!this.bgmEnabled) return;
-      const osc  = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(notes[step % notes.length], ctx.currentTime);
-      gain.gain.setValueAtTime(0.03, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
-      osc.connect(gain);
-      gain.connect(master);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.5);
-      step++;
-      this.bgmTimeout = setTimeout(tick, 500);
-    };
-    tick();
+      // 播放结束后自动播放下一首
+      source.onended = () => {
+        if (this.bgmEnabled && !this.isMuted) {
+          this.playBGM();
+        }
+      };
+
+      this.currentBGMSource = source;
+      source.start(0);
+    } catch (error) {
+      console.error('BGM加载失败:', error);
+    }
   },
 
   stopBGM() {
+    if (this.currentBGMSource) {
+      try {
+        this.currentBGMSource.stop();
+        this.currentBGMSource.disconnect();
+      } catch (e) {
+        // 忽略已停止的source错误
+      }
+      this.currentBGMSource = null;
+    }
     if (this.bgmTimeout) {
       clearTimeout(this.bgmTimeout);
       this.bgmTimeout = null;
@@ -153,7 +177,7 @@ window.SoundManager = {
       this.bgmEnabled = true;
       // 浏览器要求首次交互后才能播音
       document.addEventListener('click', () => {
-        if (this.bgmEnabled && !this.bgmTimeout) this.playBGM();
+        if (this.bgmEnabled && !this.currentBGMSource) this.playBGM();
       }, { once: true });
     }
   }
@@ -317,3 +341,5 @@ window.GameUILoader = {
     return this._promise;
   }
 };
+
+

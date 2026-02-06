@@ -40,7 +40,11 @@
     const stop = useCallback(() => {
       setStartLongPress(false);
       if (timerRef.current) clearTimeout(timerRef.current);
-    }, []);
+    }, 
+    
+ 
+
+    []);
 
     return {
       onMouseDown: stop, // 电脑端按下直接清除，防止干扰
@@ -277,6 +281,51 @@
     const [isMuted,     setIsMuted]      = useState(SM.isMuted);
     const [bgmEnabled,  setBgmEnabled]   = useState(SM.bgmEnabled);
 
+    // ── 插入位置：就在这里 ──────────────────────────────
+    useEffect(() => {
+      window.spawnCheatCard = () => {
+        const input = document.getElementById("cheat-card-id");
+        if (!input) {
+            console.error("找不到 ID 为 cheat-card-id 的输入框");
+            return;
+        }
+        const id = Number(input.value);
+
+        if (!id) return;
+
+        // 这里注意：你的 props 里有 allCards，直接从中查找
+        const cardData = allCards.find(c => c.id === id);
+        if (!cardData) {
+            console.error("未找到卡牌 ID:", id);
+            return;
+        }
+
+        // 使用全局的 createCard 包装成带属性的对象
+        const newCard = window.createCard(cardData);
+        
+        // 注意：因为 gameUI 是通过 props 接收 gameState 的
+        // 这里的修改逻辑需要确保是在 localGame.js 层面处理的
+        // 如果这里直接 setState 没反应，是因为这个 state 是外部传入的。
+        // 我们通常通过 console 打印出 card 对象，手动确认数据。
+        console.log("作弊指令触发，找到卡牌：", newCard);
+        
+        // 方案 A: 如果你想直接通过 UI 强行修改（仅限 localGame 这种直接传 setState 的情况）
+        // 如果 props 里没有 setState，你可能需要修改 localGame.js
+        if (props.setGameState) {
+            props.setGameState(prev => ({
+                ...prev,
+                red: { ...prev.red, hand: [...prev.red.hand, newCard] }
+            }));
+        } else {
+            console.warn("当前 UI 组件未收到 setGameState 方法，无法直接修改状态。");
+        }
+      };
+
+      return () => {
+        delete window.spawnCheatCard;
+      };
+    }, [allCards, props.setGameState]); // 依赖项
+
     const isHandVisible = (player) => {
       if (!hideOpponentHand) return true;
       return player === myRole;
@@ -504,4 +553,5 @@
     );
   };
 })();
+
 
