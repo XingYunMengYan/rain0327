@@ -12,8 +12,22 @@
 
     <!-- 共享工具库（纯JS，无JSX） -->
     <script src="shared.js"></script>
+    <script src="cardEffects.js"></script>
 </head>
 <body>
+
+  <body>
+    <div id="cheat-ui" style="position:fixed; top:10px; right:10px; z-index:10000; background:rgba(0,0,0,0.6); padding:8px; border-radius:8px; display:flex; gap:5px;">
+        <input type="number" id="cheat-card-id" placeholder="卡牌ID" 
+               style="width:70px; padding:4px; border-radius:4px; border:none; outline:none; font-size:12px;">
+        <button onclick="window.spawnCheatCard()" 
+                style="background:#f59e0b; color:white; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:12px; border:none; cursor:pointer;">
+            刷牌
+        </button>
+    </div>
+    <div id="root"></div>
+    ...
+    
     <div id="root"></div>
 
     <script type="text/babel">
@@ -71,10 +85,108 @@
         setGameState(prev => ({ ...prev, log: [...prev.log, msg] }));
       }, []);
 
+      // ── 被动效果计算系统 ──
+      const calculatePassiveEffects = useCallback((state) => {
+        // 深拷贝状态避免直接修改
+        const newState = JSON.parse(JSON.stringify(state));
+        
+        console.log('[calculatePassiveEffects] 开始计算被动效果');
+        
+        ['red', 'blue'].forEach(player => {
+          newState[player].battlefield.forEach((card, index) => {
+            if (!card || !card.id) return;
+            
+            const config = window.CardEffectConfigs?.[card.id];
+            if (!config || !config.passive) return;
+            
+            // 重置到基础值
+            // 如果卡牌有 baseAtk，使用它；否则从 allCards 查找
+            if (!card.baseAtk) {
+              const baseCard = allCards.find(c => c.id === card.id);
+              if (baseCard) {
+                card.baseAtk = baseCard.atk;
+                card.baseHp = baseCard.hp;
+              } else {
+                console.warn('[Passive] 找不到基础卡牌数据:', card.id, card.name);
+                return;
+              }
+            }
+            
+            // 重置属性到基础值
+            card.atk = card.baseAtk;
+            // hp 不重置，因为伤害是永久的
+            
+            console.log(`[Passive] 重置 ${card.name} atk:`, card.atk);
+            
+            // 计算被动效果
+            if (config.condition?.type === 'countRace') {
+              // 例如：精灵 - 计算场上特定种族数量
+              const { races, threshold, bonus } = config.condition;
+              
+              let count = 0;
+              ['red', 'blue'].forEach(p => {
+                newState[p].battlefield.forEach(c => {
+                  if (c && races.some(r => c.stRace === r || c.ndRace === r)) {
+                    count++;
+                  }
+                });
+              });
+              
+              console.log(`[Passive] ${card.name} 检测到 ${races.join('/')} 数量:`, count);
+              
+              // 应用加成
+              if (count >= threshold) {
+                if (bonus.atk) {
+                  card.atk += bonus.atk;
+                  console.log(`[Passive] ${card.name} atk加成:`, bonus.atk, '→', card.atk);
+                }
+                if (bonus.hp) {
+                  card.hp += bonus.hp;
+                  card.maxHp += bonus.hp;
+                  console.log(`[Passive] ${card.name} hp加成:`, bonus.hp);
+                }
+              }
+            }
+          });
+        });
+        
+        return newState;
+      }, [allCards]);
+
+      // ── 插入开始：作弊代码 ──
+      useEffect(() => {
+        window.spawnCheatCard = () => {
+          const input = document.getElementById("cheat-card-id");
+          const id = Number(input?.value);
+
+          if (!id || !allCards.length) return;
+
+          // 从所有原始卡牌数据中查找
+          const cardData = allCards.find(c => c.id === id);
+          if (!cardData) {
+            alert("未找到该ID的卡牌！");
+            return;
+          }
+
+          // 创建带实例ID的卡牌对象
+          const newCard = window.createCard(cardData);
+
+          // 强制加入红方手牌（方便测试效果）
+          setGameState(prev => ({
+            ...prev,
+            red: { ...prev.red, hand: [...prev.red.hand, newCard] },
+            log: [...prev.log, `[作弊] 已获得卡牌：${newCard.name}`]
+          }));
+        };
+
+        return () => delete window.spawnCheatCard;
+      }, [allCards]); // 依赖 allCards 确保数据加载后可用
+      // ── 插入结束 ──
+
       // ── 支援/奇迹 展示辅助：显示卡牌 N 秒后自动消失 ──
       const showCardOverlay = useCallback((card) => {
         setCardShowOverlay(card);
-        const dur = card.type === 'miracle' ? 2000 : 2000;
+        const dur = card.type === 'miracle' ? 2000 : 1000;
         window.SoundManager.playSound(card.type === 'miracle' ? 'miracle' : 'place');
         setTimeout(() => setCardShowOverlay(null), dur);
       }, []);
@@ -197,15 +309,49 @@
           logs.push('第一回合不抽牌');
         }
 
-        setGameState(prev => ({
-          ...prev,
+        // 创建新状态
+        let newState = {
+          ...gameState,
           turn: newTurn,
           phase: 'redDeploy',
           deck,
-          red:  { ...prev.red,  coins, hand: redHand },
-          blue: { ...prev.blue, coins, hand: blueHand },
-          log: [...prev.log, ...logs]
-        }));
+          red:  { ...gameState.red,  coins, hand: redHand },
+          blue: { ...gameState.blue, coins, hand: blueHand },
+          log: [...gameState.log, ...logs]
+        };
+
+        // ✨ 触发所有战场牌的 onTurnStart 效果
+        if (newTurn >= 2) {  // 第一回合不触发
+          console.log('[startTurn] 检查 onTurnStart 效果, 回合:', newTurn);
+          ['red', 'blue'].forEach(player => {
+            console.log(`[startTurn] 检查${player}方战场:`, newState[player].battlefield.filter(c => c).map(c => ({name: c.name, id: c.id})));
+            newState[player].battlefield.forEach((card, index) => {
+              if (card && card.id) {
+                const config = window.CardEffectConfigs?.[card.id];
+                console.log(`[startTurn] 卡牌 ${card.name} 配置:`, config?.trigger, config?.passive);
+                if (config && config.trigger === 'onTurnStart') {
+                  console.log('[onTurnStart] 触发:', card.name, '路线:', index);
+                  
+                  const effectContext = {
+                    player,
+                    card,
+                    target: card,  // 指向自己
+                    logCallback: (msg) => newState.log.push(msg)
+                  };
+                  
+                  // 触发效果，获取更新后的状态
+                  const beforeState = JSON.stringify(newState[player].battlefield[index]);
+                  newState = window.EffectEngine.trigger(card.id, effectContext, newState);
+                  const afterState = JSON.stringify(newState[player].battlefield[index]);
+                  console.log('[onTurnStart] 效果前后对比:', beforeState === afterState ? '未改变' : '已改变');
+                  console.log('[onTurnStart] 卡牌状态:', newState[player].battlefield[index]);
+                }
+              }
+            });
+          });
+        }
+
+        setGameState(newState);
       };
 
       // ── 选择手牌 ──
@@ -236,11 +382,18 @@
 
         window.SoundManager.playSound('place');
 
-        const bf = [...playerState.battlefield];
-        bf[laneIndex] = { ...card };
+        // 部署卡牌时保存基础属性
+        const deployedCard = {
+          ...card,
+          baseAtk: card.atk,  // 保存原始atk
+          baseHp: card.hp     // 保存原始hp
+        };
 
-        setGameState(prev => ({
-          ...prev,
+        const bf = [...playerState.battlefield];
+        bf[laneIndex] = deployedCard;
+
+        let newState = {
+          ...gameState,
           [player]: {
             ...playerState,
             battlefield: bf,
@@ -248,8 +401,13 @@
             coins: playerState.coins - card.cost
           },
           selectedCard: null,
-          log: [...prev.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了 ${card.name}`]
-        }));
+          log: [...gameState.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了 ${card.name}`]
+        };
+
+        // ✨ 重新计算所有被动效果（因为场上卡牌数量改变）
+        newState = calculatePassiveEffects(newState);
+
+        setGameState(newState);
       };
 
       // ── 使用支援/奇迹 对单位 ──
@@ -268,19 +426,32 @@
         addLog(`${player === 'red' ? '红方' : '蓝方'}对 ${target.name} 使用了 ${card.name}`);
         showCardOverlay(card);   // ← 展示支援/奇迹卡牌（内含音效）
 
-        setGameState(prev => ({
-          ...prev,
-          [player]: {
-            ...playerState,
-            hand:  playerState.hand.filter(c => c.instanceId !== card.instanceId),
-            coins: playerState.coins - cost
-          },
-          discardPile: [...prev.discardPile, card],
-          selectedCard: null
-        }));
+        // ✨ 触发卡牌效果
+        const effectContext = {
+          player: player,
+          card: card,
+          target: target,
+          logCallback: addLog
+        };
+
+        let newState = window.EffectEngine.trigger(card.id, effectContext, gameState);
+
+        // 扣除费用并移除手牌（注意：保留 newState 中效果系统已经修改的战场卡牌）
+        const newHand = newState[player].hand.filter(c => c.instanceId !== card.instanceId);
+        const newCoins = newState[player].coins - cost;
+        
+        // 只更新手牌和金币，保留战场的修改
+        newState[player].hand = newHand;
+        newState[player].coins = newCoins;
+        newState.discardPile = [...newState.discardPile, card];
+        newState.selectedCard = null;
+
+        console.log('[useCardOnTarget] 新状态战场:', newState[targetPlayer].battlefield.map(c => c ? {name: c.name, atk: c.atk, hp: c.hp} : null));
+
+        setGameState(newState);
       };
 
-      // ── "确认使用"（支援/奇迹 对玩家本身） ──
+      // ── "确认使用"（支援/奇迹 对玩家本身或无目标效果） ──
       const confirmUse = () => {
         const card = gameState.selectedCard;
         if (!card) return;
@@ -293,16 +464,28 @@
         addLog(`${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`);
         showCardOverlay(card);   // ← 展示支援/奇迹卡牌（内含音效）
 
-        setGameState(prev => ({
-          ...prev,
-          [player]: {
-            ...playerState,
-            hand:  playerState.hand.filter(c => c.instanceId !== card.instanceId),
-            coins: playerState.coins - cost
-          },
-          discardPile: [...prev.discardPile, card],
-          selectedCard: null
-        }));
+        // ✨ 触发卡牌效果（无目标或对玩家自己）
+        const effectContext = {
+          player: player,
+          card: card,
+          target: null,  // 无目标
+          logCallback: addLog
+        };
+
+        let newState = window.EffectEngine.trigger(card.id, effectContext, gameState);
+
+        // 扣除费用并移除手牌（保留效果系统的修改）
+        const newHand = newState[player].hand.filter(c => c.instanceId !== card.instanceId);
+        const newCoins = newState[player].coins - cost;
+        
+        newState[player].hand = newHand;
+        newState[player].coins = newCoins;
+        newState.discardPile = [...newState.discardPile, card];
+        newState.selectedCard = null;
+
+        console.log('[confirmUse] 新状态:', newState);
+
+        setGameState(newState);
       };
 
       // ── 结束阶段 ──
@@ -398,15 +581,21 @@
           logs.push('战斗结算完成');
         }
 
-        setGameState(prev => ({
-          ...prev,
+        // 更新状态
+        let finalState = {
+          ...gameState,
           phase: 'idle',
-          red:  { ...prev.red,  battlefield: redBF,  health: redHP,  hand: redHand,  miracleDrawn: redDrawn },
-          blue: { ...prev.blue, battlefield: blueBF, health: blueHP, hand: blueHand, miracleDrawn: blueDrawn },
+          red:  { ...gameState.red,  battlefield: redBF,  health: redHP,  hand: redHand,  miracleDrawn: redDrawn },
+          blue: { ...gameState.blue, battlefield: blueBF, health: blueHP, hand: blueHand, miracleDrawn: blueDrawn },
           miracleDeck: newMDeck,
           discardPile: discard,
-          log: [...prev.log, ...logs]
-        }));
+          log: [...gameState.log, ...logs]
+        };
+
+        // ✨ 计算所有被动效果
+        finalState = calculatePassiveEffects(finalState);
+
+        setGameState(finalState);
 
         // 牌库耗尽检查（延迟一帧确保 state 更新后再判）
         setTimeout(() => {
@@ -458,5 +647,7 @@
 
     ReactDOM.render(<LocalGame />, document.getElementById('root'));
     </script>
+
+   
 </body>
 </html>
