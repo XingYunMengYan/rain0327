@@ -11,6 +11,8 @@
     <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
     <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.7.4.0.js"></script>
     <script src="shared.js"></script>
+    <!-- 配置文件：复制 config.example.js 为 config.js 并填入你的密钥 -->
+    <script src="config.js"></script>
 </head>
 <body>
     <div id="root"></div>
@@ -18,8 +20,8 @@
     <script type="text/babel">
     const { useState, useEffect, useCallback, useRef } = React;
 
-    // PubNub配置
-    const PUBNUB_CONFIG = {
+    // PubNub配置 - 从外部config.js加载，如果没有则使用demo密钥
+    const PUBNUB_CONFIG = window.APP_CONFIG?.PUBNUB || {
         publishKey: 'demo',
         subscribeKey: 'demo',
     };
