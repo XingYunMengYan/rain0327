@@ -360,6 +360,104 @@
     },
 
     /**
+     * 立即跳到下一回合
+     */
+    skipTurn() {
+      return (ctx, state) => {
+        // 添加特殊标记，让confirmUse识别并触发nextTurn
+        state._skipToNextTurn = true;
+        ctx.log('末日！战场清空，立即进入下一回合');
+        console.log('[skipTurn] 触发跳过回合');
+        return state;
+      };
+    },
+
+    /**
+     * 地狱之主效果
+     */
+    hellLordBonus() {
+      return (ctx, state) => {
+        const player = ctx.player;
+        const opponent = ctx.opponent;
+        
+        // 检查己方是否有恶魔
+        const hasDemon = state[player].battlefield.some(c => 
+          c && (c.stRace === '恶魔' || c.ndRace === '恶魔')
+        );
+        
+        const selfBonus = hasDemon ? 4 : 3; // 有恶魔则+4，否则+3
+        
+        // 我方怪物增强
+        state[player].battlefield.forEach(card => {
+          if (card && (card.stRace === '怪物' || card.ndRace === '怪物')) {
+            card.hp += selfBonus;
+            card.maxHp += selfBonus;
+            card.atk += selfBonus;
+            console.log(`[hellLordBonus] 我方${card.name} hp+${selfBonus}, atk+${selfBonus}`);
+          }
+        });
+        
+        // 敌方怪物削弱（不影响legendary）
+        state[opponent].battlefield.forEach(card => {
+          if (card && (card.stRace === '怪物' || card.ndRace === '怪物') && card.rarity !== 'legendary') {
+            card.hp -= 3;
+            card.maxHp -= 3;
+            card.atk = Math.max(0, card.atk - 3);
+            console.log(`[hellLordBonus] 敌方${card.name} hp-3, atk-3`);
+          }
+        });
+        
+        ctx.log(`地狱之主降临！我方怪物强化+${selfBonus}/+${selfBonus}，敌方怪物削弱-3/-3`);
+        return state;
+      };
+    },
+
+    /**
+     * 互换双方战场
+     */
+    swapBattlefields() {
+      return (ctx, state) => {
+        const player = ctx.player;
+        const opponent = ctx.opponent;
+        
+        const temp = state[player].battlefield;
+        state[player].battlefield = state[opponent].battlefield;
+        state[opponent].battlefield = temp;
+        
+        ctx.log('契约生效！双方战场互换！');
+        console.log('[swapBattlefields] 战场已互换');
+        return state;
+      };
+    },
+
+    /**
+     * 首次攻击冻结目标
+     */
+    freezeOnFirstAttack(turns) {
+      return (ctx, state) => {
+        const card = ctx.card;
+        
+        // 检查是否已使用过首次攻击
+        if (card._hasUsedFirstAttack) {
+          return state;
+        }
+        
+        // 标记已使用
+        card._hasUsedFirstAttack = true;
+        
+        // 冻结目标
+        const target = ctx.target;
+        if (target) {
+          target._frozen = turns;
+          ctx.log(`${card.name} 冻结了 ${target.name} ${turns}回合！`);
+          console.log('[freezeOnFirstAttack]', target.name, '被冻结', turns, '回合');
+        }
+        
+        return state;
+      };
+    },
+
+    /**
      * 冻结卡牌
      * @param {Number} turns - 冻结回合数
      * @param {Object} filter - 目标过滤器
@@ -443,10 +541,12 @@
         
         if (opponentHp <= condition.playerHpThreshold) {
           state[opponent].health = 0;
-          ctx.log(`处决！敌方玩家血量<=7，立即击杀！`);
-          console.log('[conditionalKillPlayer] 处决成功');
+          // ✅ 添加立即胜利标记
+          state._immediateVictory = ctx.player;
+          ctx.log(`处决！敌方玩家血量<=${condition.playerHpThreshold}，立即击杀！`);
+          console.log('[conditionalKillPlayer] 处决成功，触发立即胜利');
         } else {
-          ctx.log(`处决失败：敌方血量${opponentHp} > 7`);
+          ctx.log(`处决失败：敌方血量${opponentHp} > ${condition.playerHpThreshold}`);
         }
 
         return state;
@@ -478,7 +578,271 @@
         console.log('[cascadeDamage] 级联伤害完成');
         return state;
       };
+    },
+
+     /**
+     * 从弃牌堆抽牌
+     * @param {Number} amount - 抽取数量
+     */
+    drawFromDiscard(amount) {
+      return (ctx, state) => {
+        const player = ctx.player;
+        const discardPile = state.discardPile || [];
+        
+        if (discardPile.length === 0) {
+          ctx.log('弃牌堆是空的！');
+          return state;
+        }
+        
+        // 从弃牌堆末尾抽取（最近丢弃的牌）
+        const actualAmount = Math.min(amount, discardPile.length);
+        const drawnCards = [];
+        
+        for (let i = 0; i < actualAmount; i++) {
+          const card = discardPile.pop();  // 从末尾取
+          state[player].hand.push(card);
+          drawnCards.push(card.name);
+        }
+        
+        ctx.log(`从弃牌堆抽取${actualAmount}张牌: ${drawnCards.join(', ')}`);
+        console.log('[drawFromDiscard] 抽取:', drawnCards);
+        
+        return state;
+      };
+    },
+
+/**
+ * 丢弃所有手牌并重抽（回收到公共/奇迹牌库，然后重抽）
+ */
+discardAndRedraw() {
+  return (ctx, state) => {
+    const player = ctx.player;
+    const hand = state[player].hand;
+    
+    if (hand.length === 0) {
+      ctx.log('手牌为空，无法重生！');
+      return state;
     }
+    
+    // 统计数量
+    let normalCount = 0;
+    let miracleCount = 0;
+    
+    hand.forEach(card => {
+      if (card.type === 'miracle') {
+        miracleCount++;
+      } else {
+        normalCount++;
+      }
+    });
+    
+    console.log('[discardAndRedraw] 手牌:', normalCount, '张普通牌,', miracleCount, '张奇迹牌');
+    
+    // ✨ 分类回收到对应牌库
+    hand.forEach(card => {
+      if (card.type === 'miracle') {
+        state.miracleDeck.push(card);
+      } else {
+        state.deck.push(card);  // 公共牌库
+      }
+    });
+    
+    // ✨ 洗牌（公共牌库）
+    if (normalCount > 0) {
+      for (let i = state.deck.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [state.deck[i], state.deck[j]] = [state.deck[j], state.deck[i]];
+      }
+      ctx.log(`回收${normalCount}张普通牌到公共牌库并洗牌`);
+    }
+    
+    // ✨ 洗牌（奇迹牌库）
+    if (miracleCount > 0) {
+      for (let i = state.miracleDeck.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [state.miracleDeck[i], state.miracleDeck[j]] = [state.miracleDeck[j], state.miracleDeck[i]];
+      }
+      ctx.log(`回收${miracleCount}张奇迹牌到奇迹牌库并洗牌`);
+    }
+    
+    // ✨ 清空手牌
+    state[player].hand = [];
+    
+    // ✨ 重抽普通牌（从公共牌库）
+    const drawnNormal = [];
+    const actualNormal = Math.min(normalCount, state.deck.length);
+    for (let i = 0; i < actualNormal; i++) {
+      const card = state.deck.shift();
+      state[player].hand.push(card);
+      drawnNormal.push(card.name);
+    }
+    
+    // ✨ 重抽奇迹牌（从奇迹牌库）
+    const drawnMiracle = [];
+    const actualMiracle = Math.min(miracleCount, state.miracleDeck.length);
+    for (let i = 0; i < actualMiracle; i++) {
+      const card = state.miracleDeck.shift();
+      state[player].hand.push(card);
+      drawnMiracle.push(card.name);
+    }
+    
+    ctx.log(`重抽${actualNormal}张普通牌: ${drawnNormal.join(', ')}`);
+    if (actualMiracle > 0) {
+      ctx.log(`重抽${actualMiracle}张奇迹牌: ${drawnMiracle.join(', ')}`);
+    }
+    
+    console.log('[discardAndRedraw] 重生完成');
+    console.log('  - 回收:', normalCount, '普通,', miracleCount, '奇迹');
+    console.log('  - 重抽:', actualNormal, '普通,', actualMiracle, '奇迹');
+    
+    return state;
+  };
+},
+
+ /**
+ * 从公共牌库抽牌（支持条件加成）
+ */
+drawCards(baseAmount, bonusAmount, condition) {
+  return (ctx, state) => {
+    const player = ctx.player;
+    let amount = baseAmount;
+    
+    // 检查条件
+    if (condition && bonusAmount) {
+      let conditionMet = false;
+      
+      if (condition.type === 'hasRaceOnField') {
+        const checkPlayer = condition.player === 'self' ? player : 
+                           condition.player === 'opponent' ? ctx.opponent : null;
+        
+        if (checkPlayer) {
+          const battlefield = state[checkPlayer].battlefield.filter(c => c !== null);
+          conditionMet = battlefield.some(card => 
+            condition.races.includes(card.stRace) || 
+            condition.races.includes(card.ndRace)
+          );
+          
+          console.log('[drawCards] 检查场上是否有', condition.races, ':', conditionMet);
+          console.log('[drawCards] 战场牌:', battlefield.map(c => ({ name: c.name, stRace: c.stRace, ndRace: c.ndRace })));
+        }
+      }
+      
+      if (conditionMet) {
+        amount += bonusAmount;
+        ctx.log(`检测到${condition.races.join('/')}，额外抽${bonusAmount}张！`);
+      }
+    }
+    
+    // ✨ 修复：从公共牌库抽牌（不是玩家牌库）
+    const deck = state.deck || [];  // 公共牌库
+    const actualAmount = Math.min(amount, deck.length);
+    const drawnCards = [];
+    
+    for (let i = 0; i < actualAmount; i++) {
+      const card = deck.shift();  // 从公共牌库顶部抽
+      state[player].hand.push(card);  // 加入玩家手牌
+      drawnCards.push(card.name);
+    }
+    
+    ctx.log(`抽取${actualAmount}张牌: ${drawnCards.join(', ')}`);
+    console.log('[drawCards] 从公共牌库抽取:', actualAmount, '张牌', drawnCards);
+    
+    return state;
+  };
+},
+    /**
+     * 添加免疫标记
+     * @param {Object} filter - 目标过滤器
+     */
+    addImmunity(filter) {
+      return (ctx, state) => {
+        const targets = findTargets(state, filter, ctx);
+        
+        if (targets.length === 0) {
+          ctx.log('未找到目标！');
+          return state;
+        }
+        
+        targets.forEach(card => {
+          card.immunity = true;  // 添加免疫标记
+          ctx.log(`${card.name} 获得祝福，免疫一次负面效果！`);
+          console.log('[addImmunity] 免疫:', card.name);
+        });
+        
+        return state;
+      };
+    },
+
+    /**
+ * 随机互换手牌
+ * @param {Number} amount - 互换数量
+ */
+swapRandomHands(amount) {
+  return (ctx, state) => {
+    const player = ctx.player;
+    const opponent = ctx.opponent;
+    const usingCard = ctx.card;  // 正在使用的卡牌（愚戏）
+    
+    const myHand = state[player].hand;
+    const oppHand = state[opponent].hand;
+    
+    // ✅ 修复：排除正在使用的卡牌，避免愚戏自己被换走
+    const availableMyHand = myHand.filter(c => c.instanceId !== usingCard.instanceId);
+    
+    // 检查手牌数量
+    const mySwapAmount = Math.min(amount, availableMyHand.length);
+    const oppSwapAmount = Math.min(amount, oppHand.length);
+    
+    if (mySwapAmount === 0 && oppSwapAmount === 0) {
+      ctx.log('双方手牌都为空，无法交换！');
+      return state;
+    }
+    
+    // 从我方手牌随机抽取（排除愚戏本身）
+    const mySwappedCards = [];
+    for (let i = 0; i < mySwapAmount; i++) {
+      const randomIndex = Math.floor(Math.random() * availableMyHand.length);
+      const card = availableMyHand.splice(randomIndex, 1)[0];
+      mySwappedCards.push(card);
+      // 同时从原手牌中移除
+      const originalIndex = myHand.findIndex(c => c.instanceId === card.instanceId);
+      if (originalIndex !== -1) {
+        myHand.splice(originalIndex, 1);
+      }
+    }
+    
+    // 从敌方手牌随机抽取
+    const oppSwappedCards = [];
+    for (let i = 0; i < oppSwapAmount; i++) {
+      const randomIndex = Math.floor(Math.random() * oppHand.length);
+      const card = oppHand.splice(randomIndex, 1)[0];
+      oppSwappedCards.push(card);
+    }
+    
+    // 交换到对方手牌
+    state[player].hand.push(...oppSwappedCards);
+    state[opponent].hand.push(...mySwappedCards);
+    
+    ctx.log(`互换手牌：我方给出${mySwapAmount}张，获得${oppSwapAmount}张`);
+    console.log('[swapRandomHands] 我方给出:', mySwappedCards.map(c => c.name));
+    console.log('[swapRandomHands] 我方获得:', oppSwappedCards.map(c => c.name));
+    
+    return state;
+  };
+},
+
+    /**
+     * UI模式消息（用于特殊交互模式）
+     * @param {String} message - 提示消息
+     */
+    uiModeMessage(message) {
+      return (ctx, state) => {
+        ctx.log(message);
+        console.log('[uiModeMessage]', message);
+        return state;
+      };
+    }
+
 
     // ── 后续会添加更多效果原子函数 ──
     // drawCards, returnToHand, etc.
@@ -710,6 +1074,59 @@
     },
 
     // ════════════════════════════════════════════════════════
+    // 14: 地狱之主（奇迹牌）
+    // 效果：所有我方怪物hp+3，atk+3；敌方所有怪物hp-3，atk-3。
+    //       若我方有恶魔，则额外hp+1，atk+1。此牌对敌方legendary不生效
+    // ════════════════════════════════════════════════════════
+    14: {
+      name: '地狱之主',
+      type: 'miracle',
+      trigger: 'onPlay',
+      needsTarget: false,
+      effects: [
+        {
+          atom: 'hellLordBonus'
+        }
+      ]
+    },
+
+    // ════════════════════════════════════════════════════════
+    // 12: 契约生效（奇迹牌）
+    // 效果：与敌方玩家互换场上所有卡牌
+    // ════════════════════════════════════════════════════════
+    12: {
+      name: '契约生效',
+      type: 'miracle',
+      trigger: 'onPlay',
+      needsTarget: false,
+      effects: [
+        {
+          atom: 'swapBattlefields'
+        }
+      ]
+    },
+
+    // ════════════════════════════════════════════════════════
+    // 5: 受难日（奇迹牌）
+    // 效果：除了卡牌（宗教），清除场上所有卡牌
+    // ════════════════════════════════════════════════════════
+    5: {
+      name: '受难日',
+      type: 'miracle',
+      trigger: 'onPlay',
+      needsTarget: false,
+      effects: [
+        {
+          atom: 'clearField',
+          filter: {
+            player: 'both',
+            exceptRace: '宗教'
+          }
+        }
+      ]
+    },
+
+    // ════════════════════════════════════════════════════════
     // 1: 上帝（奇迹牌）- 完整版
     // 效果：移除所有负面效果，同时我方全体hp+3，玩家hp+3
     // ════════════════════════════════════════════════════════
@@ -816,8 +1233,10 @@
           filter: {
             player: 'both'
           }
+        },
+        {
+          atom: 'skipTurn'
         }
-        // 立刻结束回合的逻辑需要在游戏主逻辑中处理
       ]
     },
 
@@ -891,12 +1310,15 @@
     // 效果：每阶段可重置位置
     // 触发时机：passive（UI功能，不是效果系统）
     28: {
-      name: '空间法师',
-      type: 'battlefield',
-      trigger: 'passive',
-      passive: true,
-      canReposition: true  // 标记：允许重新定位
-    },
+  name: '空间法师',
+  type: 'battlefield',
+  trigger: 'passive',
+  passive: true,
+  hasActiveAbility: true,  // 标记有主动能力
+  activeAbilityType: 'reposition',  // 主动能力类型
+  activeAbilityUsesPerPhase: 1,  // 每阶段使用次数
+  effects: []  // 被动效果为空（主动触发）
+},
 
     // 29-30: 精灵（战场牌）
     // 效果：若场上有>=2的（森林）/（奇珍），atk+2
@@ -949,6 +1371,419 @@
           filter: {
             target: 'self'
           }
+        }
+      ]
+    },
+
+    // ══════════════════════════════════════════════════════════
+    // 条件触发战场牌
+    // ══════════════════════════════════════════════════════════
+
+    // 32: 女巫 (epic)
+    // 效果：敌方每有一人类，我方全体atk+1。我方每有一神圣，女巫atk+1
+    32: {
+      name: '女巫',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'multiBonus',  // 多重加成
+        bonuses: [
+          {
+            type: 'countOpponentRace',
+            races: ['人类'],
+            bonus: { targetAll: true, atk: 1 }
+          },
+          {
+            type: 'countSelfRace',
+            races: ['神圣'],
+            bonus: { targetSelf: true, atk: 1 }
+          }
+        ]
+      }
+    },
+
+    // 35: 骷髅教主 (epic)
+    // 效果：我方所有怪物atk+2；若敌方有神圣，我方所有骷髅hp+2
+    // 注：简化实现 - 只实现怪物atk+2，神圣条件检查待完善
+    35: {
+      name: '骷髅教主',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'raceBonus',
+        races: ['怪物'],
+        bonus: { atk: 2 }
+      }
+    },
+
+    // 36: 吸血鬼男爵 (rare)
+    // 效果：我方每有一怪物，我方全体atk+1
+    36: {
+      name: '吸血鬼男爵',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'countSelfRace',
+        races: ['怪物'],
+        bonus: { targetAll: true, atk: 1 }
+      }
+    },
+
+    // 39: 怪物猎人 (rare)
+    // 效果：敌方每有一怪物，atk+1。若战斗对象为怪物，atk额外+2
+    39: {
+      name: '怪物猎人',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'countOpponentRace',
+        races: ['怪物'],
+        bonus: { atk: 1 }
+      }
+    },
+
+    // 40: 怪物猎人 (rare)
+    // 效果：敌方每有一怪物，atk+1。若战斗对象为怪物，atk额外+2
+    40: {
+      name: '怪物猎人',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'countOpponentRace',
+        races: ['怪物'],
+        bonus: { atk: 1 }
+      }
+    },
+
+    // 42: 骑士 (legendary)
+    // 效果：我方每有一张人类，全体hp+1；我方每有一张军队，全体atk+1
+    42: {
+      name: '骑士',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'multiBonus',
+        bonuses: [
+          {
+            type: 'countSelfRace',
+            races: ['人类'],
+            bonus: { targetAll: true, hp: 1 }
+          },
+          {
+            type: 'countSelfRace',
+            races: ['军队'],
+            bonus: { targetAll: true, atk: 1 }
+          }
+        ]
+      }
+    },
+
+    // 43: 祭司 (epic)
+    // 效果：所有宗教的hp+2
+    43: {
+      name: '祭司',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'raceBonus',
+        races: ['宗教'],
+        bonus: { hp: 2 }
+      }
+    },
+
+    // 45: 刺客 (rare)
+    // 效果：首次攻击atk*2
+    45: {
+      name: '刺客',
+      type: 'battlefield',
+      trigger: 'passive',  
+      passive: true,
+      effects: []  // 标记，在战斗逻辑中处理
+    },
+
+    // 46: 吸血鬼 (common)
+    // 效果：对人类的atk+2
+    46: {
+      name: '吸血鬼',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'vsRaceBonus',
+        races: ['人类'],
+        bonus: { atk: 2 }
+      }
+    },
+
+    // 49: 公主 (epic)
+    // 效果：敌方每次hp+，我方全体atk+1；敌方每次atk+，我方全体hp+1
+    // 注：这个需要监听事件，暂时标记为反应式加成（未完全实现）
+    49: {
+      name: '公主',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'reactiveBonus'  // 反应式加成（需要特殊实现）
+      }
+    },
+
+    // 50: 屠龙勇士 (epic)
+    // 效果：对龙的atk*2；如果被秒杀，血量强制维持在1，只有一次
+    50: {
+      name: '屠龙勇士',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'vsRaceBonus',
+        races: ['龙'],
+        bonus: { atkMultiplier: 2 }
+      }
+    },
+
+    // 55: 公爵 (epic)
+    // 效果：每有一贵族，自身atk+2。场上所有平民hp-1
+    55: {
+      name: '公爵',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'multiBonus',
+        bonuses: [
+          {
+            type: 'countAllRace',
+            races: ['贵族'],
+            bonus: { targetSelf: true, atk: 2 }
+          },
+          {
+            type: 'raceBonus',
+            races: ['平民'],
+            bonus: { hp: -1 }
+          }
+        ]
+      }
+    },
+
+    // 60: 路西法 (legendary)
+    // 效果：对（神圣）的atk*2，对（怪物）的atk+2
+    60: {
+      name: '路西法',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'multiBonus',
+        bonuses: [
+          {
+            type: 'vsRaceBonus',
+            races: ['神圣'],
+            bonus: { atkMultiplier: 2 }
+          },
+          {
+            type: 'vsRaceBonus',
+            races: ['怪物'],
+            bonus: { atk: 2 }
+          }
+        ]
+      }
+    },
+
+    // 61: 女伯爵 (rare)
+    // 效果：每次攻击后，hp+1
+    61: {
+      name: '女伯爵',
+      type: 'battlefield',
+      trigger: 'onAfterAttack',
+      passive: true,
+      effects: [
+        {
+          atom: 'modifyHp',
+          amount: 1,
+          filter: { target: 'self' }
+        }
+      ]
+    },
+
+    // 66: 驱魔师 (rare)
+    // 效果：对（恶魔）的atk+6
+    66: {
+      name: '驱魔师',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'vsRaceBonus',
+        races: ['恶魔'],
+        bonus: { atk: 6 }
+      }
+    },
+
+    // 67: 将军 (rare)
+    // 效果：我方每有一人类，全体atk+1
+    67: {
+      name: '将军',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'countSelfRace',
+        races: ['人类'],
+        bonus: { targetAll: true, atk: 1 }
+      }
+    },
+
+    // 69: 渎神者 (rare)
+    // 效果：敌方每一怪物/神圣，atk+2
+    69: {
+      name: '渎神者',
+      type: 'battlefield',
+      trigger: 'passive',
+      passive: true,
+      condition: {
+        type: 'countOpponentRace',
+        races: ['怪物', '神圣'],
+        bonus: { atk: 2 }
+      }
+    },
+
+    // 63: 冰精灵 (common)
+    // 效果：首次攻击，冰冻敌方一回合
+    63: {
+      name: '冰精灵',
+      type: 'battlefield',
+      trigger: 'onAfterAttack',
+      passive: true,
+      effects: [
+        {
+          atom: 'freezeOnFirstAttack',
+          turns: 1
+        }
+      ]
+    },
+
+    // 77: 空间法术（支援牌）
+    // 效果：进入重排模式，允许玩家重新排列己方场上卡牌位置
+    // 状态：需要特殊UI实现
+
+    77: {
+      name: '空间法术',
+      type: 'support',
+      trigger: 'onPlay',
+      needsTarget: false,
+      requiresUIMode: 'reposition',  // 特殊UI模式
+      effects: [
+        {
+          atom: 'uiModeMessage',
+          message: '进入重排模式：点击选择要移动的卡牌，然后选择目标位置'
+        }
+      ]
+    },
+
+    // 79: 死亡召唤（支援牌）
+    // 效果：从弃牌堆抽取两张牌
+    79: {
+      name: '死亡召唤',
+      type: 'support',
+      trigger: 'onPlay',
+      needsTarget: false,
+      effects: [
+        {
+          atom: 'drawFromDiscard',
+          amount: 2
+        }
+      ]
+    },
+
+   80: {
+  name: '愚戏',
+  type: 'support',
+  trigger: 'onPlay',
+  needsTarget: false,
+  effects: [
+    {
+      atom: 'swapRandomHands',
+      amount: 3
+    }
+  ]
+},
+
+    // 87: 替名（支援牌）
+    // 效果：选择一张我方与敌方于场上的卡牌互换
+    87: {
+      name: '替名',
+      type: 'support',
+      trigger: 'onPlay',
+      needsTarget: false,
+      requiresUIMode: 'swapBattlefield',  // 特殊UI模式
+      effects: [
+        {
+          atom: 'uiModeMessage',
+          message: '进入交换模式：点击己方卡牌，然后点击敌方卡牌进行交换'
+        }
+      ]
+    },
+
+    // 88: 祝福（支援牌）
+    // 效果：指定一张牌，免疫一次所有效果负面，包括被攻击
+    88: {
+      name: '祝福',
+      type: 'support',
+      trigger: 'onPlay',
+      needsTarget: true,
+      targetFilter: {
+        player: 'both',
+        location: 'battlefield'
+      },
+      effects: [
+        {
+          atom: 'addImmunity',
+          filter: {
+            target: 'selected'
+          }
+        }
+      ]
+    },
+
+    // 90: 召唤法阵（支援牌）
+    // 效果：抽2张牌。若我方场上此时有（法术），额外抽一张
+    90: {
+      name: '召唤法阵',
+      type: 'support',
+      trigger: 'onPlay',
+      needsTarget: false,
+      effects: [
+        {
+          atom: 'drawCards',
+          baseAmount: 2,
+          bonusAmount: 1,
+          condition: {
+            type: 'hasRaceOnField',
+            races: ['法术'],
+            player: 'self'
+          }
+        }
+      ]
+    },
+
+    // 91: 重生（支援牌）
+    // 效果：丢弃所有手牌，重新抽取相同数量的牌
+    91: {
+      name: '重生',
+      type: 'support',
+      trigger: 'onPlay',
+      needsTarget: false,
+      effects: [
+        {
+          atom: 'discardAndRedraw'
         }
       ]
     }
@@ -1099,6 +1934,16 @@
             effectConfig.condition
           );
         }
+
+        // 检查是否需要特殊UI模式
+    if (config.requiresUIMode) {
+      // 交由UI层处理，这里只记录日志
+      ctx.log(`${config.name} 需要特殊交互模式: ${config.requiresUIMode}`);
+      console.log('[EffectEngine] 触发UI模式:', config.requiresUIMode);
+      
+      // 对于UI模式，不执行effects，由UI层接管
+      return gameState;  // 返回原状态，不消耗卡牌（由UI完成后再消耗）
+    }
 
         // 执行效果
         state = executor(ctx, state);
