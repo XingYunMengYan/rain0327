@@ -107,9 +107,12 @@ window.SoundManager = {
     localStorage.setItem('bgmEnabled', this.bgmEnabled);
   },
 
-  async playBGM() {
+ async playBGM() {
     if (this.isMuted || !this.bgmEnabled) return;
     this.init();
+    
+    // 先停止当前播放的BGM，避免重复播放
+    this.stopBGM();
     
     // 随机选择一首BGM（避免重复播放同一首）
     let randomIndex;
@@ -126,12 +129,15 @@ window.SoundManager = {
       const arrayBuffer = await response.arrayBuffer();
       const audioBuffer = await this.context.decodeAudioData(arrayBuffer);
 
+      // 再次检查状态，因为在异步加载期间可能被关闭了
+      if (!this.bgmEnabled || this.isMuted) return;
+
       // 创建音频源
       const source = this.context.createBufferSource();
       const gainNode = this.context.createGain();
       
       source.buffer = audioBuffer;
-      gainNode.gain.value = 0.1; // 音量
+      gainNode.gain.value = 0.05; // 音量
       
       source.connect(gainNode);
       gainNode.connect(this.context.destination);
@@ -182,6 +188,7 @@ window.SoundManager = {
     }
   }
 };
+
 
 // ──────────────────────────────────────────
 // 2. CSV 加载 + 解析
