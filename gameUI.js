@@ -68,7 +68,7 @@
 
     // 长按触发
     const longPressProps = useLongPress(() => {
-      if (card && card.effect && !faceDown) {
+      if (card && !faceDown) {
         setShowMobileModal(true);
         SM.playSound('click'); // 提示音
       }
@@ -84,7 +84,17 @@
     }
 
     const isMiracle   = card.type === 'miracle';
-    const rarityClass = getRarityClass(card.rarity);
+    const isSupport   = card.type === 'support';
+    
+    // 根据卡牌类型决定背景色
+    let bgClass;
+    if (isMiracle) {
+      bgClass = 'from-purple-200 to-purple-300 border-purple-500';
+    } else if (isSupport) {
+      bgClass = 'from-green-200 to-green-300 border-green-500';
+    } else {
+      bgClass = getRarityClass(card.rarity); // 战场牌使用稀有度颜色
+    }
 
     // 电脑端：鼠标悬停计算位置
     const updateDesktopTip = () => {
@@ -108,11 +118,11 @@
         <div ref={cardRef} 
           {...longPressProps} // 绑定长按事件
           onClick={onClick}
-          onMouseEnter={() => card.effect && requestAnimationFrame(updateDesktopTip)}
+          onMouseEnter={() => requestAnimationFrame(updateDesktopTip)}
           onMouseLeave={() => setDesktopTipStyle({ visibility:'hidden', opacity:0 })}
           className={`relative p-1 md:p-2 rounded-lg border-2 cursor-pointer transition-all flex-shrink-0
             ${isSelected ? 'border-yellow-400 shadow-lg scale-105' : ''}
-            bg-gradient-to-br ${rarityClass} ${cardSizeClass} flex flex-col`}
+            bg-gradient-to-br ${bgClass} ${cardSizeClass} flex flex-col`}
           style={{ overflow:'visible', userSelect:'none', WebkitUserSelect:'none' }}>
           
           <div className="absolute inset-0 p-1 md:p-2 rounded-lg overflow-hidden flex flex-col">
@@ -164,20 +174,18 @@
           </div>
 
           {/* 电脑端 Tooltip */}
-          {card.effect && (
-            <div ref={tooltipRef} style={{...desktopTipStyle, transition:'opacity 0.15s ease-in-out'}}
-              className="hidden md:block p-3 bg-gray-900 text-white text-xs rounded-lg shadow-2xl w-64 border-2 border-yellow-400 pointer-events-none">
-              <div className="font-bold text-yellow-300 mb-1">{card.name}</div>
-              <div className="whitespace-pre-wrap leading-relaxed">{card.effect}</div>
-            </div>
-          )}
+          <div ref={tooltipRef} style={{...desktopTipStyle, transition:'opacity 0.15s ease-in-out'}}
+            className="hidden md:block p-3 bg-gray-900 text-white text-xs rounded-lg shadow-2xl w-64 border-2 border-yellow-400 pointer-events-none">
+            <div className="font-bold text-yellow-300 mb-1">{card.name}</div>
+            <div className="whitespace-pre-wrap leading-relaxed">{card.effect || "无特殊效果"}</div>
+          </div>
         </div>
 
          {/* 移动端详情模态框 (点击背景关闭) */}
         {showMobileModal && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black bg-opacity-80 p-4"
             onClick={(e) => { e.stopPropagation(); setShowMobileModal(false); }}>
-            <div className={`p-4 rounded-xl border-2 border-yellow-400 shadow-2xl w-full max-w-sm bg-gradient-to-br ${rarityClass} text-gray-900 relative`}
+            <div className={`p-4 rounded-xl border-2 border-yellow-400 shadow-2xl w-full max-w-sm bg-gradient-to-br ${bgClass} text-gray-900 relative`}
               onClick={(e) => e.stopPropagation() /* 点击卡片本身不关闭 */}>
                 
               <button onClick={() => setShowMobileModal(false)} className="absolute top-2 right-2 p-1 bg-black bg-opacity-20 rounded-full text-white">
@@ -269,10 +277,15 @@
     const {
       gameState, gamePhase, allCards, winner, battleAnimation,
       cardShowOverlay = null,
+      swapMode = null,
       extraUI = null,
       onStartPicking, onPickCard, onStartTurn,
       onSelectCard, onPlayCard, onUseCardOnTarget, onConfirmUse, onEndPhase,
       onReset,
+      onBattlefieldClick,
+      onFinishSwap,
+      onCancelSwap,
+      onActivateSpaceMage,  // ← 添加这行
       hideOpponentHand = false,
       myRole = null
     } = props;
@@ -331,32 +344,136 @@
       return player === myRole;
     };
 
-    // ── 路线 (Lane) ──
-    const Lane = ({ laneIndex, player }) => {
-      const card        = gameState[player].battlefield[laneIndex];
-      const sel         = gameState.selectedCard;
-      const canDeploy   = sel && sel.type === 'battlefield' && !card &&
-                          ((gameState.phase === 'redDeploy'  && player === 'red') ||
-                           (gameState.phase === 'blueDeploy' && player === 'blue'));
-      const canTarget   = sel && (sel.type === 'support' || sel.type === 'miracle') && card;
-      const isAnimating = battleAnimation.active && battleAnimation.lane === laneIndex;
+   // ── 路线 (Lane) - 包含战场槽和建筑槽 ──
+const Lane = ({ laneIndex, player }) => {
+  const card        = gameState[player].battlefield[laneIndex];
+  const building    = gameState[player].buildings?.[laneIndex];  // 建筑槽
+  const sel         = gameState.selectedCard;
+  
+  // 检查选中的卡牌是否是建筑
+  const selIsBuilding = sel && (sel.stRace === '建筑' || sel.ndRace === '建筑');
+  
+  // 战场槽：只能部署非建筑牌
+  const canDeployBattlefield = sel && sel.type === 'battlefield' && !selIsBuilding && !card &&
+                      ((gameState.phase === 'redDeploy'  && player === 'red') ||
+                       (gameState.phase === 'blueDeploy' && player === 'blue'));
+  
+  // 建筑槽：只能部署建筑牌
+  const canDeployBuilding = sel && sel.type === 'battlefield' && selIsBuilding && !building &&
+                      ((gameState.phase === 'redDeploy'  && player === 'red') ||
+                       (gameState.phase === 'blueDeploy' && player === 'blue'));
+  
+  const canTarget   = sel && (sel.type === 'support' || sel.type === 'miracle') && card;
+  const isAnimating = battleAnimation.active && battleAnimation.lane === laneIndex;
+  
+  // ✨ 交换模式
+  const inSwapMode = swapMode !== null;
+  const isSelected = swapMode?.firstSlot?.player === player && swapMode?.firstSlot?.lane === laneIndex;
+  const canSwap = inSwapMode && (
+    !swapMode.firstSlot ||  // 第一次点击：任何卡槽
+    (swapMode.type === 'reposition' && player === swapMode.firstSlot.player) ||  // 空间法术：只能己方
+    (swapMode.type === 'swapBattlefield')  // 替名：任意
+  );
 
-      // 移动端高度需自适应，最小高度设小一点
-      return (
-        <div onClick={() => { if (canDeploy) onPlayCard(laneIndex); else if (canTarget) onUseCardOnTarget(player, laneIndex); }}
-          className={`border-2 border-dashed rounded-lg p-1 md:p-2 min-h-[130px] md:min-h-[190px] flex items-center justify-center transition-all
-            ${isAnimating  ? 'animate-pulse bg-yellow-200 border-yellow-500' : ''}
-            ${canDeploy    ? 'border-green-400 bg-green-50 cursor-pointer hover:bg-green-100' : ''}
-            ${canTarget    ? 'border-yellow-400 bg-yellow-50 cursor-pointer hover:bg-yellow-100' : ''}
-            ${!canDeploy && !canTarget ? (player === 'blue' ? 'border-gray-300 bg-blue-50' : 'border-gray-300 bg-red-50') : ''}`}>
-          {card ? (
-            <div className="pointer-events-none"> {/* 防止在Slot里再次触发卡牌点击，Slot负责处理交互 */}
-              <Card card={card} />
-            </div>
-          ) : <div className="text-gray-400 text-[10px] md:text-xs text-center writing-mode-vertical md:writing-mode-horizontal">{laneIndex + 1}</div>}
+  // ✨ 检测空间法师
+  const isSpaceMage = card && card.id === 28;
+  const isCurrentPlayer = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? player === 'red' : player === 'blue';
+  const canUseSpaceMage = isSpaceMage && isCurrentPlayer && gamePhase === 'playing' && !swapMode && !card.usedAbilityThisPhase;
+
+  // 返回包含战场槽和建筑槽的两层结构
+  // 红方：建筑在上，战场在下
+  // 蓝方：战场在上，建筑在下
+  const BattlefieldSlot = (
+    <div onClick={() => {
+        if (inSwapMode && canSwap) {
+          onBattlefieldClick(player, laneIndex);
+        } else if (canDeployBattlefield) {
+          onPlayCard(laneIndex, false);  // false = 战场槽
+        } else if (canTarget) {
+          onUseCardOnTarget(player, laneIndex);
+        }
+      }}
+      className={`border-2 border-dashed rounded-lg p-1 md:p-2 min-h-[130px] md:min-h-[190px] flex flex-col items-center justify-center transition-all
+        ${isAnimating  ? 'animate-pulse bg-yellow-200 border-yellow-500' : ''}
+        ${isSelected   ? 'border-purple-500 bg-purple-100 ring-4 ring-purple-300' : ''}
+        ${canSwap && !isSelected ? 'border-purple-400 bg-purple-50 cursor-pointer hover:bg-purple-100' : ''}
+        ${canDeployBattlefield ? 'border-green-400 bg-green-50 cursor-pointer hover:bg-green-100' : ''}
+        ${canTarget    ? 'border-yellow-400 bg-yellow-50 cursor-pointer hover:bg-yellow-100' : ''}
+        ${!canDeployBattlefield && !canTarget && !canSwap && !isSelected ? (player === 'blue' ? 'border-gray-300 bg-blue-50' : 'border-gray-300 bg-red-50') : ''}`}>
+      
+      {card ? (
+        <div className="w-full flex flex-col items-center gap-1">
+          <Card card={card} onClick={(e) => e.stopPropagation()} />
+          
+          {/* 空间法师按钮 */}
+          {canUseSpaceMage && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (onActivateSpaceMage) {
+                  SM.playSound('click');
+                onActivateSpaceMage(player, laneIndex);
+              }
+            }}
+            className="pointer-events-auto mt-1 px-2 py-1 bg-purple-500 hover:bg-purple-600 text-white text-[10px] md:text-xs rounded font-bold shadow-lg animate-pulse"
+          >
+            🔮 重置位置
+          </button>
+        )}
+        
+        {isSpaceMage && card.usedAbilityThisPhase && (
+          <div className="text-[8px] md:text-xs text-gray-500 mt-1">
+            已使用
+          </div>
+        )}
+      </div>
+    ) : (
+      <div className="text-gray-400 text-[10px] md:text-xs text-center">战场</div>
+    )}
+    </div>
+  );
+
+  const BuildingSlot = (
+    <div onClick={() => {
+        if (canDeployBuilding) {
+          onPlayCard(laneIndex, true);  // true = 建筑槽
+        }
+      }}
+      className={`border-2 border-dashed rounded-lg p-1 md:p-2 min-h-[80px] md:min-h-[120px] flex flex-col items-center justify-center transition-all
+        ${canDeployBuilding ? 'border-amber-400 bg-amber-50 cursor-pointer hover:bg-amber-100' : ''}
+        ${!canDeployBuilding ? (player === 'blue' ? 'border-gray-200 bg-blue-50/30' : 'border-gray-200 bg-red-50/30') : ''}`}>
+      
+      {building ? (
+        <div className="w-full flex flex-col items-center gap-1">
+          <Card card={building} onClick={(e) => e.stopPropagation()} />
         </div>
-      );
-    };
+      ) : (
+        <div className="text-gray-300 text-[8px] md:text-[10px] text-center flex items-center gap-1">
+          <span>🏰</span>
+          <span>建筑</span>
+        </div>
+      )}
+    </div>
+  );
+
+  // 红方：建筑在上，战场在下
+  // 蓝方：战场在上，建筑在下
+  return (
+    <div className="flex flex-col gap-1">
+      {player === 'red' ? (
+        <>
+          {BuildingSlot}
+          {BattlefieldSlot}
+        </>
+      ) : (
+        <>
+          {BattlefieldSlot}
+          {BuildingSlot}
+        </>
+      )}
+    </div>
+  );
+};
 
     // ── 手牌区 ──
     const HandArea = ({ player, labelColor }) => {
@@ -524,7 +641,13 @@
             {gamePhase === 'playing' && gameState.phase === 'idle' && !isGameOver && (
               <button onClick={() => { SM.playSound('click'); onStartTurn(); }} className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold text-sm md:text-base flex-1 md:flex-none">下一回合</button>
             )}
-            {gamePhase === 'playing' && gameState.phase !== 'idle' && gameState.phase !== 'battle' && (
+            {swapMode && swapMode.type === 'reposition' && (
+              <>
+                <button onClick={() => { SM.playSound('click'); onFinishSwap(); }} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-bold text-sm md:text-base animate-pulse flex-1 md:flex-none">完成重排</button>
+                <button onClick={() => { SM.playSound('click'); onCancelSwap(); }} className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-bold text-sm md:text-base flex-1 md:flex-none">取消</button>
+              </>
+            )}
+            {gamePhase === 'playing' && gameState.phase !== 'idle' && gameState.phase !== 'battle' && !swapMode && (
               <>
                 <button onClick={() => { SM.playSound('click'); onEndPhase(); }} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-sm md:text-base flex-1 md:flex-none">结束阶段</button>
                 {canConfirmUse && (
@@ -553,5 +676,3 @@
     );
   };
 })();
-
-
