@@ -326,6 +326,17 @@
 
     // 是否为 AI / 联网模式（影响 UI 布局）
     const isCompactMode = detectedMode === 'ai' || detectedMode === 'online';
+    
+    // ── 移动端检测 ──
+    const [isMobileView, setIsMobileView] = useState(window.innerWidth < 768);
+    useEffect(() => {
+      const handleResize = () => setIsMobileView(window.innerWidth < 768);
+      window.addEventListener('resize', handleResize);
+      return () => window.removeEventListener('resize', handleResize);
+    }, []);
+    
+    // 移动端其他UI弹窗控制
+    const [showMobileMenu, setShowMobileMenu] = useState(false);
 
     // ── 血量变动检测与动画 ──
     const [animatingHealth, setAnimatingHealth] = useState({ red: false, blue: false });
@@ -827,15 +838,185 @@ const Lane = ({ laneIndex, player }) => {
       );
 
     } else {
-      // ══════════════════════════════════════════════════════════
-      // AI / 联网模式：三栏布局，一屏无滚动
-      //
-      // ┌─────────────┬──────────────────┬──────────────┐
-      // │  左栏        │    中栏           │   右栏        │
-      // │  我方手牌    │  蓝方战场         │  控制按钮     │
-      // │  垂直滚动    │  红方战场         │  操作按钮     │
-      // └─────────────┴──────────────────┴──────────────┘
-      // ══════════════════════════════════════════════════════════
+      // ══════════════════════════════════════════════════════════════
+      // 移动端 AI / 联网模式专用布局（新设计）
+      // ════════════════════════════════════════════════════════════════
+      if (isMobileView && isCompactMode) {
+        const myHand = myRole ? gameState[myRole].hand : [];
+        const opponentRole = myRole === 'red' ? 'blue' : 'red';
+        
+        return (
+          <div className="w-full h-screen bg-gradient-to-br from-slate-800 to-slate-900 overflow-hidden flex flex-col">
+            <CommonOverlays />
+            
+            {/* 顶部：左侧"更多"按钮 + 敌方血量+金币（靠右） */}
+            <div className="flex-shrink-0 px-3 pt-2 pb-1 flex justify-between items-center">
+              <button
+                onClick={() => setShowMobileMenu(true)}
+                className="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded text-xs font-bold flex items-center gap-1">
+                <Icons.Menu size={12} />
+              </button>
+              <div className="flex gap-2 text-white text-xs">
+                <div className="flex items-center gap-1">
+                  <Icons.Heart className="text-red-400" size={14} />
+                  <span className="font-bold">{gameState[opponentRole].health}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Icons.Coins className="text-yellow-400" size={14} />
+                  <span className="font-bold">{gameState[opponentRole].coins}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 中间：战场（正中央偏上方）与敌方战场 */}
+            <div className="flex-1 flex flex-col justify-center items-center min-h-0 px-2 py-1 overflow-hidden">
+              {/* 敌方战场 */}
+              <div className="flex-shrink-0 mb-2">
+                <div className="text-[10px] text-blue-300 mb-1">敌方战场</div>
+                <div className="flex gap-0.5 justify-center">
+                  {[0,1,2,3].map(i => <div key={i}><Lane laneIndex={i} player={opponentRole} /></div>)}
+                </div>
+              </div>
+
+              {/* 我方战场 */}
+              <div className="flex-shrink-0">
+                <div className="text-[10px] text-red-300 mb-1">我方战场</div>
+                <div className="flex gap-0.5 justify-center">
+                  {[0,1,2,3].map(i => <div key={i}><Lane laneIndex={i} player={myRole} /></div>)}
+                </div>
+              </div>
+            </div>
+
+            {/* 下方：手牌区 + 控制按钮 */}
+            <div className="flex-shrink-0 px-2 pb-2 flex flex-col gap-1">
+              {/* 我方血量+金币+手牌数（靠右） */}
+              <div className="flex justify-between items-center text-white text-xs px-1">
+                <div className="text-[10px] text-gray-400">手牌区</div>
+                <div className="flex gap-3 items-center">
+                  <div className="flex items-center gap-1">
+                    <Icons.Heart className="text-red-400" size={14} />
+                    <span className={`font-bold ${animatingHealth[myRole] ? 'animate-stat-change' : ''}`}>{gameState[myRole].health}</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Icons.Coins className="text-yellow-400" size={14} />
+                    <span className="font-bold">{gameState[myRole].coins}</span>
+                  </div>
+                  <div className="text-gray-400">({myHand.length}张)</div>
+                </div>
+              </div>
+
+              {/* 手牌横向滚动 */}
+              <div className="flex gap-1 overflow-x-auto pb-1" style={{WebkitOverflowScrolling:'touch'}}>
+                {myHand.map(card => (
+                  <div key={card.instanceId} className="flex-shrink-0">
+                    <Card
+                      card={card}
+                      onClick={() => { SM.playSound('click'); onSelectCard(card, myRole); }}
+                      isSelected={gameState.selectedCard?.instanceId === card.instanceId}
+                    />
+                  </div>
+                ))}
+                <div className="w-1 flex-shrink-0"></div>
+              </div>
+
+              {/* 底部控制栏：右侧阶段按钮 */}
+              <div className="flex justify-end items-center gap-2">
+                {/* 显示回合数 */}
+                <div className="text-white font-bold text-xs bg-gray-700 px-2 py-1 rounded">
+                  第 {gameState.turn} 回
+                </div>
+                
+                {/* 阶段指示灯 */}
+                <div className="flex gap-0.5">
+                  {['idle', 'redDeploy', 'blueDeploy', 'redSupport', 'battle'].map((phase, idx) => (
+                    <div
+                      key={phase}
+                      className={`w-2 h-2 rounded-full ${
+                        gameState.phase === phase 
+                          ? 'bg-yellow-400 scale-125' 
+                          : phase === 'idle' || phase === 'battle'
+                          ? 'bg-gray-500'
+                          : 'bg-gray-600'
+                      }`}
+                    />
+                  ))}
+                </div>
+                
+                {gamePhase === 'playing' && gameState.phase === 'idle' && !isGameOver && (
+                  <button
+                    onClick={() => { SM.playSound('click'); onStartTurn(); }}
+                    className="px-2 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded font-bold text-xs">
+                    下一回合
+                  </button>
+                )}
+                {gamePhase === 'playing' && gameState.phase !== 'idle' && gameState.phase !== 'battle' && !swapMode && (
+                  <button
+                    onClick={() => { SM.playSound('click'); onEndPhase(); }}
+                    className="px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold text-xs">
+                    结束阶段
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* 移动端菜单弹窗 */}
+            {showMobileMenu && (
+              <div className="fixed inset-0 z-50 flex items-end bg-black bg-opacity-50"
+                onClick={() => setShowMobileMenu(false)}>
+                <div className="w-full bg-gray-800 rounded-t-2xl p-4"
+                  onClick={e => e.stopPropagation()}>
+                  <div className="text-white text-lg font-bold mb-3">其他选项</div>
+                  
+                  <div className="flex flex-col gap-2">
+                    <button onClick={() => { SM.playSound('click'); setShowAllCards(true); setShowMobileMenu(false); }}
+                      className="w-full px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-bold flex items-center gap-2">
+                      <Icons.Eye size={16} /> 卡牌图鉴
+                    </button>
+
+                    <button onClick={() => { SM.toggleMute(); setIsMuted(SM.isMuted); SM.playSound('click'); }}
+                      className="w-full px-3 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded font-bold flex items-center gap-2">
+                      {SM.isMuted ? <Icons.VolumeX size={16} /> : <Icons.Volume2 size={16} />}
+                      {SM.isMuted ? '启用声音' : '关闭声音'}
+                    </button>
+
+                    <button onClick={() => { SM.toggleBGM(); setBgmEnabled(SM.bgmEnabled); SM.playSound('click'); }}
+                      className={`w-full px-3 py-2 ${SM.bgmEnabled ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 hover:bg-gray-700'} text-white rounded font-bold flex items-center gap-2`}>
+                      <Icons.Music size={16} />
+                      {SM.bgmEnabled ? '关闭BGM' : '启用BGM'}
+                    </button>
+
+                    <button onClick={() => { SM.playSound('click'); onReset(); }}
+                      className="w-full px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded font-bold flex items-center gap-2">
+                      <Icons.RefreshCw size={16} /> 重新开始
+                    </button>
+
+                    <button onClick={() => { window.location.href = 'index.html'; }}
+                      className="w-full px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded font-bold flex items-center gap-2">
+                      <Icons.Home size={16} /> 返回主界面
+                    </button>
+
+                    <button onClick={() => setShowMobileMenu(false)}
+                      className="w-full px-3 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded font-bold mt-2">
+                      关闭
+                    </button>
+                  </div>
+
+                  {/* 信息区 */}
+                  <div className="mt-4 pt-4 border-t border-gray-700 text-gray-400 text-xs">
+                    <div className="mb-1">牌堆: {gameState.deck.length} | 奇迹: {gameState.miracleDeck?.length || 0} | 弃牌: {gameState.discardPile.length}</div>
+                    <div className="text-[10px] leading-relaxed max-h-24 overflow-y-auto">
+                      <strong>最近日志：</strong><br/>
+                      {gameState.log.slice(-3).map((msg, i) => <div key={i} className="mb-1">{msg}</div>)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+      
+      // AI / 联网模式：三栏布局（桌面端原有设计）
       const isLocalGame = myRole === null; // localGame: 面对面模式（gameMode='ai' 但 myRole=null）
       const myHand = myRole ? gameState[myRole].hand : [];
       const opponentRole = myRole === 'red' ? 'blue' : 'red';

@@ -325,6 +325,14 @@ window.Icons = (function () {
     X: svg([
       line(18,6,6,18),
       line(6,6,18,18)
+    ]),
+    Menu: svg([
+      line(3,6,21,6),
+      line(3,12,21,12),
+      line(3,18,21,18)
+    ]),
+    Music: svg([
+      path('M9 18v-7.5M9 3v2.5M9 8h0M15 18v-3.5M15 5v.5M15 8h0M6 19h12a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z')
     ])
   };
 })();
