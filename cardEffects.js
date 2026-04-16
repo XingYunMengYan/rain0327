@@ -1405,16 +1405,26 @@ swapRandomHands(amount) {
 
     // 35: 骷髅教主 (epic)
     // 效果：我方所有怪物atk+2；若敌方有神圣，我方所有骷髅hp+2
-    // 注：简化实现 - 只实现怪物atk+2，神圣条件检查待完善
     35: {
       name: '骷髅教主',
       type: 'battlefield',
       trigger: 'passive',
       passive: true,
       condition: {
-        type: 'raceBonus',
-        races: ['怪物'],
-        bonus: { atk: 2 }
+        type: 'multiBonus',
+        bonuses: [
+          {
+            type: 'raceBonus',
+            races: ['怪物'],
+            bonus: { atk: 2 }
+          },
+          {
+            type: 'conditionalRaceBonus',
+            checkOpponentHas: ['神圣'],  // 检查敌方是否有神圣
+            targetRaces: ['骷髅'],
+            bonus: { hp: 2 }
+          }
+        ]
       }
     },
 
@@ -1859,6 +1869,16 @@ swapRandomHands(amount) {
         return gameState;  // 返回原状态，效果未生效
       }
 
+      // 检查是否需要特殊UI模式（在执行任何效果前检查）
+      if (config.requiresUIMode) {
+        // 交由UI层处理，这里只记录日志
+        ctx.log(`${config.name} 需要特殊交互模式: ${config.requiresUIMode}`);
+        console.log('[EffectEngine] 触发UI模式:', config.requiresUIMode);
+        
+        // 对于UI模式，不执行effects，由UI层接管
+        return gameState;  // 返回原状态，不消耗卡牌（由UI完成后再消耗）
+      }
+
       // 依次执行配置的效果链
       config.effects.forEach(effectConfig => {
         const atomName = effectConfig.atom;
@@ -1934,16 +1954,6 @@ swapRandomHands(amount) {
             effectConfig.condition
           );
         }
-
-        // 检查是否需要特殊UI模式
-    if (config.requiresUIMode) {
-      // 交由UI层处理，这里只记录日志
-      ctx.log(`${config.name} 需要特殊交互模式: ${config.requiresUIMode}`);
-      console.log('[EffectEngine] 触发UI模式:', config.requiresUIMode);
-      
-      // 对于UI模式，不执行effects，由UI层接管
-      return gameState;  // 返回原状态，不消耗卡牌（由UI完成后再消耗）
-    }
 
         // 执行效果
         state = executor(ctx, state);

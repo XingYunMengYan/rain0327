@@ -10,473 +10,148 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
 
-    <!-- 共享工具库（纯JS，无JSX） -->
+    <!-- 共享工具库 -->
     <script src="shared.js"></script>
     <script src="cardEffects.js"></script>
+    <!-- 游戏核心规则（所有模式共享） -->
+    <script src="gameManager.js"></script>
+
+    <style>
+        #cheat-ui {
+            position: fixed; bottom: 10px; left: 10px; z-index: 10000;
+            background: rgba(0,0,0,0.7); padding: 10px; border-radius: 8px;
+            display: flex; gap: 6px; flex-direction: column;
+            border: 2px solid #f59e0b;
+        }
+        #cheat-card-id {
+            width: 80px; padding: 6px; border-radius: 4px;
+            border: none; outline: none; font-size: 12px;
+        }
+        #cheat-ui button {
+            background: #f59e0b; color: white; padding: 6px 12px;
+            border-radius: 4px; font-weight: bold; font-size: 12px;
+            border: none; cursor: pointer;
+        }
+        #cheat-ui button:hover {
+            background: #d97706;
+        }
+
+        /* 战场牌碰撞动画 */
+        @keyframes collide-up {
+            0% { transform: translateY(0); opacity: 1; }
+            40% { transform: translateY(-20px); opacity: 1; }
+            100% { transform: translateY(0); opacity: 1; }
+        }
+
+        @keyframes collide-down {
+            0% { transform: translateY(0); opacity: 1; }
+            40% { transform: translateY(20px); opacity: 1; }
+            100% { transform: translateY(0); opacity: 1; }
+        }
+
+        /* 数值变动动画 - 放大缩小 + 变红色 */
+        @keyframes stat-change {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.3); color: #ef4444 !important; }
+            100% { transform: scale(1); }
+        }
+
+        .animate-collide-up {
+            animation: collide-up 0.6s ease-out !important;
+        }
+
+        .animate-collide-down {
+            animation: collide-down 0.6s ease-out !important;
+        }
+
+        .animate-stat-change {
+            animation: stat-change 0.6s ease-out !important;
+        }
+    </style>
 </head>
 <body>
-    <!-- 作弊UI -->
-    <div id="cheat-ui" style="position:fixed; top:10px; right:10px; z-index:10000; background:rgba(0,0,0,0.6); padding:8px; border-radius:8px; display:flex; gap:5px;">
-        <input type="number" id="cheat-card-id" placeholder="卡牌ID" 
-               style="width:70px; padding:4px; border-radius:4px; border:none; outline:none; font-size:12px;">
-        <button onclick="window.spawnCheatCard()" 
-                style="background:#f59e0b; color:white; padding:4px 8px; border-radius:4px; font-weight:bold; font-size:12px; border:none; cursor:pointer;">
-            刷牌
-        </button>
+    <!-- 作弊UI（仅 localGame 有，现已移到左下角） -->
+    <div id="cheat-ui">
+        <div style="color: #f59e0b; font-size: 11px; font-weight: bold; text-align: center;">⚙️ 作弊工具</div>
+        <input type="number" id="cheat-card-id" placeholder="卡牌ID">
+        <button type="button" onclick="window.spawnCheatCard()">刷入手牌</button>
     </div>
-    
-    <!-- React根节点 -->
+
     <div id="root"></div>
 
     <script type="text/babel">
     // ============================================================
-    // localGame — 面对面模式逻辑层
-    // UI 全部由 GameUI 组件负责，此处只写 state + 规则
+    // localGame — 面对面模式
+    // 职责：面对面选牌流程、作弊功能、换位功能
+    // 游戏规则全部委托给 GameManager
     // ============================================================
     const { useState, useEffect, useCallback } = React;
+    const GM = window.GameManager;
 
     const LocalGame = () => {
-      // ── 等待 GameUI 加载完成 ──
       const [uiReady, setUiReady] = useState(false);
-
       useEffect(() => {
         window.GameUILoader.load().then(() => setUiReady(true));
-        // 恢复音效设置
         window.SoundManager.restoreFromStorage();
       }, []);
 
-      // ── 卡牌数据 ──
-      const [allCards, setAllCards] = useState([]);
+      const [allCards,        setAllCards]       = useState([]);
+      const [gameState,       setGameState]      = useState(GM.INIT_STATE());
+      const [gamePhase,       setGamePhase]      = useState('notStarted');
+      const [winner,          setWinner]         = useState(null);
+      const [battleAnimation, setBattleAnimation] = useState({ active: false, lane: -1 });
+      const [cardShowOverlay, setCardShowOverlay] = useState(null);
+      const [swapMode,        setSwapMode]       = useState(null);
 
       useEffect(() => {
         window.loadCards()
           .then(cards => setAllCards(cards))
-          .catch(err => {
-            console.error('加载卡牌失败', err);
-            alert('无法加载 card_data.csv，请确保文件在同一目录下并通过本地服务器访问。');
-          });
+          .catch(() => alert('无法加载 card_data.csv，请确保文件在同一目录下并通过本地服务器访问。'));
       }, []);
 
-      // ── 游戏核心状态 ──
-      const INIT_STATE = {
-        turn: 0,
-        phase: 'idle',   // idle | redDeploy | blueDeploy | redSupport | battle
-        red:  { health: 30, coins: 0, hand: [], battlefield: [null,null,null,null], buildings: [null,null,null,null], miracleDrawn: [30] },
-        blue: { health: 30, coins: 0, hand: [], battlefield: [null,null,null,null], buildings: [null,null,null,null], miracleDrawn: [30] },
-        deck: [],
-        miracleDeck: [],
-        discardPile: [],
-        initialCards: [],        // 当前选牌阶段待选的6张
-        initialCardsBlue: [],    // 蓝方待选的6张（红方选完后替换）
-        selectedCard: null,
-        log: []
-      };
-
-      const [gameState,       setGameState]      = useState(INIT_STATE);
-      const [gamePhase,       setGamePhase]      = useState('notStarted');
-      const [winner,          setWinner]         = useState(null);
-      const [battleAnimation, setBattleAnimation] = useState({ active: false, lane: -1 });
-      const [cardShowOverlay, setCardShowOverlay] = useState(null);  // 支援/奇迹展示
-      const [swapMode,        setSwapMode]       = useState(null);   // 交换模式: { type: 'reposition'/'swapBattlefield', card, firstSlot: {player, lane} }
-
-      // ── 日志辅助 ──
       const addLog = useCallback((msg) => {
         setGameState(prev => ({ ...prev, log: [...prev.log, msg] }));
       }, []);
 
-      // ── 被动效果计算系统（扩展版） ──
-      const calculatePassiveEffects = useCallback((state) => {
-        // 深拷贝状态避免直接修改
-        const newState = JSON.parse(JSON.stringify(state));
-        
-        console.log('[calculatePassiveEffects] 开始计算被动效果');
-        
-        // 辅助函数：统计特定种族数量
-        const countRaces = (player, races) => {
-          let count = 0;
-          newState[player].battlefield.forEach(c => {
-            if (c && races.some(r => c.stRace === r || c.ndRace === r)) {
-              count++;
-            }
-          });
-          return count;
-        };
-
-        // 辅助函数：统计全场特定种族数量
-        const countAllRaces = (races) => {
-          let count = 0;
-          ['red', 'blue'].forEach(p => {
-            newState[p].battlefield.forEach(c => {
-              if (c && races.some(r => c.stRace === r || c.ndRace === r)) {
-                count++;
-              }
-            });
-          });
-          return count;
-        };
-
-        // 辅助函数：获取对方玩家
-        const getOpponent = (player) => player === 'red' ? 'blue' : 'red';
-        
-        ['red', 'blue'].forEach(player => {
-          const opponent = getOpponent(player);
-          
-          newState[player].battlefield.forEach((card, index) => {
-            if (!card || !card.id) return;
-            
-            const config = window.CardEffectConfigs?.[card.id];
-            if (!config || !config.passive) return;
-            
-            // 重置到基础值
-            if (!card.baseAtk) {
-              const baseCard = allCards.find(c => c.id === card.id);
-              if (baseCard) {
-                card.baseAtk = baseCard.atk;
-                card.baseHp = baseCard.hp;
-              } else {
-                console.warn('[Passive] 找不到基础卡牌数据:', card.id, card.name);
-                return;
-              }
-            }
-            
-            // 重置属性到基础值
-            card.atk = card.baseAtk;
-            // hp 不重置，因为伤害是永久的
-            // 但 maxHp 需要重置
-            if (!card.baseMaxHp) {
-              card.baseMaxHp = card.baseHp;
-            }
-            card.maxHp = card.baseMaxHp;
-            
-            console.log(`[Passive] 重置 ${card.name} atk:${card.atk}, maxHp:${card.maxHp}`);
-            
-            // ═══════════════════════════════════════════════
-            // 条件类型处理
-            // ═══════════════════════════════════════════════
-            const condition = config.condition;
-            if (!condition) return;
-
-            // 1. countRace - 原有的统计全场种族（向后兼容）
-            if (condition.type === 'countRace') {
-              const { races, threshold, bonus } = condition;
-              const count = countAllRaces(races);
-              
-              console.log(`[Passive] ${card.name} 检测到 ${races.join('/')} 数量:`, count);
-              
-              if (count >= threshold) {
-                if (bonus.atk) {
-                  card.atk += bonus.atk;
-                  console.log(`[Passive] ${card.name} atk加成:`, bonus.atk, '→', card.atk);
-                }
-                if (bonus.hp) {
-                  card.hp += bonus.hp;
-                  card.maxHp += bonus.hp;
-                  console.log(`[Passive] ${card.name} hp加成:`, bonus.hp);
-                }
-              }
-            }
-            
-            // 2. countSelfRace - 统计己方种族数量
-            else if (condition.type === 'countSelfRace') {
-              const { races, bonus } = condition;
-              const count = countRaces(player, races);
-              
-              console.log(`[Passive] ${card.name} 检测到己方 ${races.join('/')} 数量:`, count);
-              
-              if (bonus.targetAll) {
-                // 给己方全体加成
-                newState[player].battlefield.forEach(c => {
-                  if (c) {
-                    if (bonus.atk) c.atk += bonus.atk * count;
-                    if (bonus.hp) {
-                      c.hp += bonus.hp * count;
-                      c.maxHp += bonus.hp * count;
-                    }
-                  }
-                });
-                console.log(`[Passive] ${card.name} 给全体加成: atk+${bonus.atk * count}, hp+${bonus.hp * count}`);
-              } else if (bonus.targetSelf) {
-                // 只给自己加成
-                if (bonus.atk) card.atk += bonus.atk * count;
-                if (bonus.hp) {
-                  card.hp += bonus.hp * count;
-                  card.maxHp += bonus.hp * count;
-                }
-                console.log(`[Passive] ${card.name} 自身加成: atk+${bonus.atk * count}, hp+${bonus.hp * count}`);
-              } else {
-                // 默认给自己加成
-                if (bonus.atk) card.atk += bonus.atk * count;
-                if (bonus.hp) {
-                  card.hp += bonus.hp * count;
-                  card.maxHp += bonus.hp * count;
-                }
-              }
-            }
-            
-            // 3. countOpponentRace - 统计敌方种族数量
-            else if (condition.type === 'countOpponentRace') {
-              const { races, bonus } = condition;
-              const count = countRaces(opponent, races);
-              
-              console.log(`[Passive] ${card.name} 检测到敌方 ${races.join('/')} 数量:`, count);
-              
-              if (bonus.targetAll) {
-                // 给己方全体加成
-                newState[player].battlefield.forEach(c => {
-                  if (c) {
-                    if (bonus.atk) c.atk += bonus.atk * count;
-                    if (bonus.hp) {
-                      c.hp += bonus.hp * count;
-                      c.maxHp += bonus.hp * count;
-                    }
-                  }
-                });
-              } else {
-                // 给自己加成
-                if (bonus.atk) card.atk += bonus.atk * count;
-                if (bonus.hp) {
-                  card.hp += bonus.hp * count;
-                  card.maxHp += bonus.hp * count;
-                }
-              }
-            }
-            
-            // 4. countAllRace - 统计全场种族数量
-            else if (condition.type === 'countAllRace') {
-              const { races, bonus } = condition;
-              const count = countAllRaces(races);
-              
-              console.log(`[Passive] ${card.name} 检测到全场 ${races.join('/')} 数量:`, count);
-              
-              if (bonus.targetSelf) {
-                if (bonus.atk) card.atk += bonus.atk * count;
-                if (bonus.hp) {
-                  card.hp += bonus.hp * count;
-                  card.maxHp += bonus.hp * count;
-                }
-              }
-            }
-            
-            // 5. raceBonus - 给特定种族加成/减益
-            else if (condition.type === 'raceBonus') {
-              const { races, bonus } = condition;
-              
-              ['red', 'blue'].forEach(p => {
-                newState[p].battlefield.forEach(c => {
-                  if (c && races.some(r => c.stRace === r || c.ndRace === r)) {
-                    if (bonus.atk) c.atk += bonus.atk;
-                    if (bonus.hp) {
-                      c.hp += bonus.hp;
-                      c.maxHp += bonus.hp;
-                    }
-                  }
-                });
-              });
-              
-              console.log(`[Passive] ${card.name} 给 ${races.join('/')} 种族加成`);
-            }
-            
-            // 6. vsRaceBonus - 对特定种族战斗时加成（标记，战斗时检查）
-            else if (condition.type === 'vsRaceBonus') {
-              card._vsRaceBonus = condition;
-              console.log(`[Passive] ${card.name} 对 ${condition.races.join('/')} 有战斗加成`);
-            }
-            
-            // 7. multiBonus - 多重加成
-            else if (condition.type === 'multiBonus') {
-              const { bonuses } = condition;
-              
-              bonuses.forEach(bonusConfig => {
-                const { type, races, bonus } = bonusConfig;
-                
-                if (type === 'countSelfRace') {
-                  const count = countRaces(player, races);
-                  
-                  if (bonus.targetAll) {
-                    newState[player].battlefield.forEach(c => {
-                      if (c) {
-                        if (bonus.atk) c.atk += bonus.atk * count;
-                        if (bonus.hp) {
-                          c.hp += bonus.hp * count;
-                          c.maxHp += bonus.hp * count;
-                        }
-                      }
-                    });
-                  } else if (bonus.targetSelf) {
-                    if (bonus.atk) card.atk += bonus.atk * count;
-                    if (bonus.hp) {
-                      card.hp += bonus.hp * count;
-                      card.maxHp += bonus.hp * count;
-                    }
-                  }
-                  
-                  console.log(`[Passive] ${card.name} multiBonus - 己方${races.join('/')}数量:${count}`);
-                }
-                else if (type === 'countOpponentRace') {
-                  const count = countRaces(opponent, races);
-                  
-                  if (bonus.targetAll) {
-                    newState[player].battlefield.forEach(c => {
-                      if (c) {
-                        if (bonus.atk) c.atk += bonus.atk * count;
-                        if (bonus.hp) {
-                          c.hp += bonus.hp * count;
-                          c.maxHp += bonus.hp * count;
-                        }
-                      }
-                    });
-                  } else if (bonus.targetSelf) {
-                    if (bonus.atk) card.atk += bonus.atk * count;
-                    if (bonus.hp) {
-                      card.hp += bonus.hp * count;
-                      card.maxHp += bonus.hp * count;
-                    }
-                  }
-                  
-                  console.log(`[Passive] ${card.name} multiBonus - 敌方${races.join('/')}数量:${count}`);
-                }
-                else if (type === 'countAllRace') {
-                  const count = countAllRaces(races);
-                  
-                  if (bonus.targetSelf) {
-                    if (bonus.atk) card.atk += bonus.atk * count;
-                    if (bonus.hp) {
-                      card.hp += bonus.hp * count;
-                      card.maxHp += bonus.hp * count;
-                    }
-                  }
-                  
-                  console.log(`[Passive] ${card.name} multiBonus - 全场${races.join('/')}数量:${count}`);
-                }
-                else if (type === 'raceBonus') {
-                  ['red', 'blue'].forEach(p => {
-                    newState[p].battlefield.forEach(c => {
-                      if (c && races.some(r => c.stRace === r || c.ndRace === r)) {
-                        if (bonus.atk) c.atk += bonus.atk;
-                        if (bonus.hp) {
-                          c.hp += bonus.hp;
-                          c.maxHp += bonus.hp;
-                        }
-                      }
-                    });
-                  });
-                }
-                else if (type === 'vsRaceBonus') {
-                  // 战斗加成标记
-                  if (!card._vsRaceBonuses) card._vsRaceBonuses = [];
-                  card._vsRaceBonuses.push(bonusConfig);
-                }
-              });
-            }
-          });
-        });
-        
-        // ✅ 修复公爵bug：被动效果可能导致卡牌死亡，需要检查并移除
-        ['red', 'blue'].forEach(player => {
-          newState[player].battlefield = newState[player].battlefield.map((card, idx) => {
-            if (card && card.hp <= 0) {
-              console.log(`[Passive死亡检查] ${player}路线${idx+1}: ${card.name} hp=${card.hp} 已死亡`);
-              newState.discardPile.push(card);
-              newState.log.push(`${card.name} 被击败（被动效果导致hp≤0）`);
-              return null;
-            }
-            return card;
-          });
-        });
-        
-        return newState;
-      }, [allCards]);
-
-      // ── 插入开始：作弊代码 ──
-      useEffect(() => {
-        window.spawnCheatCard = () => {
-          const input = document.getElementById("cheat-card-id");
-          const id = Number(input?.value);
-
-          if (!id || !allCards.length) return;
-
-          // 从所有原始卡牌数据中查找
-          const cardData = allCards.find(c => c.id === id);
-          if (!cardData) {
-            alert("未找到该ID的卡牌！");
-            return;
-          }
-
-          // 创建带实例ID的卡牌对象
-          const newCard = window.createCard(cardData);
-
-          // ✅ 根据当前阶段判断给谁刷牌
-          const currentPlayer = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') 
-            ? 'red' 
-            : (gameState.phase === 'blueDeploy' || gameState.phase === 'blueSupport')
-            ? 'blue'
-            : 'red'; // 默认红方
-
-          setGameState(prev => ({
-            ...prev,
-            [currentPlayer]: { 
-              ...prev[currentPlayer], 
-              hand: [...prev[currentPlayer].hand, newCard] 
-            },
-            log: [...prev.log, `[作弊] ${currentPlayer === 'red' ? '红方' : '蓝方'}获得卡牌：${newCard.name}`]
-          }));
-        };
-
-        return () => delete window.spawnCheatCard;
-      }, [allCards, gameState.phase]); // ✅ 添加 gameState.phase 依赖
-      // ── 插入结束 ──
-
-      // ── 支援/奇迹 展示辅助：显示卡牌 N 秒后自动消失 ──
       const showCardOverlay = useCallback((card) => {
         setCardShowOverlay(card);
-        const dur = card.type === 'miracle' ? 2000 : 1000;
         window.SoundManager.playSound(card.type === 'miracle' ? 'miracle' : 'place');
-        setTimeout(() => setCardShowOverlay(null), dur);
+        setTimeout(() => setCardShowOverlay(null), 2000);
       }, []);
 
       // ── 初始化 ──
       const initGame = useCallback(() => {
         if (!allCards.length) return;
-
-        const regular  = allCards.filter(c => c.type !== 'miracle');
-        const miracles = allCards.filter(c => c.type === 'miracle');
-
-        const deck         = window.shuffleArray(regular.map(window.createCard));
-        const miracleDeck  = window.shuffleArray(miracles.map(window.createCard));
-
-        // 红蓝各抽6张（互不重叠）
-        const redSix  = deck.slice(0, 6);
-        const blueSix = deck.slice(6, 12);
-        const rest    = deck.slice(12);
-
-        // 各抽1张奇迹
-        const mDeck   = [...miracleDeck];
-        const redM    = mDeck.pop();
-        const blueM   = mDeck.pop();
-
-        setGameState({
-          ...INIT_STATE,
-          red:  { ...INIT_STATE.red,  hand: redM  ? [redM]  : [] },
-          blue: { ...INIT_STATE.blue, hand: blueM ? [blueM] : [] },
-          deck: rest,
-          miracleDeck: mDeck,
-          initialCards: redSix,
-          initialCardsBlue: blueSix,
-          log: ['游戏初始化完成！', '红蓝双方各抽取1张奇迹牌', '点击"开始选牌"进入选牌阶段']
-        });
+        setGameState(GM.initGame(allCards));
         setGamePhase('notStarted');
         setWinner(null);
       }, [allCards]);
 
-      // 卡牌加载后自动初始化
       useEffect(() => { if (allCards.length) initGame(); }, [allCards, initGame]);
-
-      // 复盘事件监听（点击"复盘"按钮时隐藏胜利遮层）
       useEffect(() => {
         const handler = () => setWinner(null);
         window.addEventListener('gameui:review', handler);
         return () => window.removeEventListener('gameui:review', handler);
       }, []);
+
+      // ── 作弊功能（localGame 专属） ──
+      useEffect(() => {
+        window.spawnCheatCard = () => {
+          const id = Number(document.getElementById('cheat-card-id')?.value);
+          if (!id || !allCards.length) return;
+          const cardData = allCards.find(c => c.id === id);
+          if (!cardData) { alert('未找到该ID的卡牌！'); return; }
+          const newCard = window.createCard(cardData);
+          const currentPlayer = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red'
+            : (gameState.phase === 'blueDeploy' || gameState.phase === 'blueSupport') ? 'blue' : 'red';
+          setGameState(prev => ({
+            ...prev,
+            [currentPlayer]: { ...prev[currentPlayer], hand: [...prev[currentPlayer].hand, newCard] },
+            log: [...prev.log, `[作弊] ${currentPlayer === 'red' ? '红方' : '蓝方'}获得卡牌：${newCard.name}`]
+          }));
+        };
+        return () => delete window.spawnCheatCard;
+      }, [allCards, gameState.phase]);
 
       // ── 开始选牌 ──
       const startPicking = () => {
@@ -484,34 +159,27 @@
         addLog('--- 红方选牌阶段 ---');
       };
 
-      // ── 选牌逻辑 ──
+      // ── 选牌逻辑（面对面：双方轮流在同一屏幕上选） ──
       const pickCard = (card) => {
         if (gamePhase === 'redPicking') {
           const newHand = [...gameState.red.hand, card];
           const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
-
-          if (newHand.length === 3) {  // 已有1奇迹 + 刚选第2张 = 3 → 红方选牌完
+          if (newHand.length === 3) {
             setGameState(prev => ({
               ...prev,
               red: { ...prev.red, hand: newHand },
-              initialCards: prev.initialCardsBlue,   // 切换到蓝方的6张
+              initialCards: prev.initialCardsBlue,
               deck: window.shuffleArray([...prev.deck, ...remaining])
             }));
             setGamePhase('bluePicking');
             addLog('红方选牌完成 → 蓝方选牌阶段');
           } else {
-            setGameState(prev => ({
-              ...prev,
-              red: { ...prev.red, hand: newHand },
-              initialCards: remaining
-            }));
+            setGameState(prev => ({ ...prev, red: { ...prev.red, hand: newHand }, initialCards: remaining }));
             addLog(`红方选择了 ${card.name}`);
           }
-
         } else if (gamePhase === 'bluePicking') {
           const newHand = [...gameState.blue.hand, card];
           const remaining = gameState.initialCards.filter(c => c.instanceId !== card.instanceId);
-
           if (newHand.length === 3) {
             setGameState(prev => ({
               ...prev,
@@ -522,109 +190,23 @@
             setGamePhase('playing');
             addLog('蓝方选牌完成 → 点击"下一回合"开始游戏');
           } else {
-            setGameState(prev => ({
-              ...prev,
-              blue: { ...prev.blue, hand: newHand },
-              initialCards: remaining
-            }));
+            setGameState(prev => ({ ...prev, blue: { ...prev.blue, hand: newHand }, initialCards: remaining }));
             addLog(`蓝方选择了 ${card.name}`);
           }
         }
       };
 
-      // ── 开始新回合 ──
+      // ── 回合开始 ──
       const startTurn = () => {
-        const newTurn = gameState.turn + 1;
-        const coins   = Math.min(newTurn, 10);
-        const logs    = [`--- 第${newTurn}回合开始 ---`, `双方获得 ${coins} 金币`];
-
-        let deck      = [...gameState.deck];
-        let redHand   = [...gameState.red.hand];
-        let blueHand  = [...gameState.blue.hand];
-
-        if (newTurn >= 2) {
-          for (let i = 0; i < 2; i++) {
-            const r = deck.pop(); if (r) redHand.push(r);
-            const b = deck.pop(); if (b) blueHand.push(b);
-          }
-          logs.push('双方各抽2张牌');
-        } else {
-          logs.push('第一回合不抽牌');
-        }
-
-        // 创建新状态
-        let newState = {
-          ...gameState,
-          turn: newTurn,
-          phase: 'redDeploy',
-          deck,
-          red:  { ...gameState.red,  coins, hand: redHand },
-          blue: { ...gameState.blue, coins, hand: blueHand },
-          log: [...gameState.log, ...logs]
-        };
-
-        // ✨ 触发所有战场牌的 onTurnStart 效果
-        if (newTurn >= 2) {  // 第一回合不触发
-          console.log('[startTurn] 检查 onTurnStart 效果, 回合:', newTurn);
-          ['red', 'blue'].forEach(player => {
-            console.log(`[startTurn] 检查${player}方战场:`, newState[player].battlefield.filter(c => c).map(c => ({name: c.name, id: c.id})));
-            newState[player].battlefield.forEach((card, index) => {
-              if (card && card.id) {
-                const config = window.CardEffectConfigs?.[card.id];
-                console.log(`[startTurn] 卡牌 ${card.name} 配置:`, config?.trigger, config?.passive);
-                if (config && config.trigger === 'onTurnStart') {
-                  console.log('[onTurnStart] 触发:', card.name, '路线:', index);
-                  
-                  const effectContext = {
-                    player,
-                    card,
-                    target: card,  // 指向自己
-                    logCallback: (msg) => newState.log.push(msg)
-                  };
-                  
-                  // 触发效果，获取更新后的状态
-                  const beforeState = JSON.stringify(newState[player].battlefield[index]);
-                  newState = window.EffectEngine.trigger(card.id, effectContext, newState);
-                  const afterState = JSON.stringify(newState[player].battlefield[index]);
-                  console.log('[onTurnStart] 效果前后对比:', beforeState === afterState ? '未改变' : '已改变');
-                  console.log('[onTurnStart] 卡牌状态:', newState[player].battlefield[index]);
-                }
-              }
-            });
-          });
-        }
-
-        // ✅ 清除护盾和减少冻结回合数
-        ['red', 'blue'].forEach(player => {
-          newState[player].battlefield.forEach(card => {
-            if (card) {
-              // 清除护盾
-              if (card._shield) {
-                delete card._shield;
-              }
-              // 减少冻结回合数
-              if (card._frozen && card._frozen > 0) {
-                card._frozen--;
-                if (card._frozen === 0) {
-                  delete card._frozen;
-                  newState.log.push(`${card.name} 解除冻结`);
-                }
-              }
-            }
-          });
-        });
-
+        const newState = GM.doStartTurn(gameState);
         setGameState(newState);
       };
 
       // ── 选择手牌 ──
       const selectCard = (card, player) => {
         if (gameState.phase === 'idle' || gameState.phase === 'battle') return;
-
         const isRedPhase = gameState.phase === 'redDeploy' || gameState.phase === 'redSupport';
         if ((isRedPhase && player !== 'red') || (!isRedPhase && player !== 'blue')) return;
-
-        // 反复点击同一张 → 取消选择
         if (gameState.selectedCard?.instanceId === card.instanceId) {
           setGameState(prev => ({ ...prev, selectedCard: null }));
           return;
@@ -632,860 +214,154 @@
         setGameState(prev => ({ ...prev, selectedCard: card }));
       };
 
-      // ── 放置战场牌/建筑牌 ──
+      // ── 部署战场牌 ──
       const playCard = (laneIndex, isBuilding = false) => {
         const card = gameState.selectedCard;
         if (!card || card.type !== 'battlefield') return;
-
-        const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-        const playerState = gameState[player];
-
-        if (playerState.coins < card.cost) { addLog('金币不足！'); return; }
+        const player = GM.getPhasePlayer(gameState.phase);
+        const result = GM.playCard(gameState, card, player, laneIndex, isBuilding);
+        if (result.error) { addLog(result.error); return; }
         
-        // 检查卡牌是否是建筑
-        const cardIsBuilding = card.stRace === '建筑' || card.ndRace === '建筑';
-        
-        // 建筑牌只能放在建筑槽，非建筑牌只能放在战场槽
-        if (cardIsBuilding && !isBuilding) {
-          addLog('建筑牌需要放置在建筑槽！');
-          return;
+        // 骑士(42)等登场效果在 cardEffects.js 中处理，触发 EffectEngine
+        let newState = result.state;
+        if (window.EffectEngine && window.CardEffectConfigs?.[card.id]?.trigger === 'onDeploy') {
+          const effectContext = {
+            player, card,
+            laneIndex,
+            logCallback: (msg) => newState.log.push(msg)
+          };
+          newState = window.EffectEngine.trigger(card.id, effectContext, newState);
         }
-        if (!cardIsBuilding && isBuilding) {
-          addLog('建筑槽只能放置建筑牌！');
-          return;
-        }
-        
-        // 检查目标槽位是否已占用
-        const targetSlot = isBuilding ? playerState.buildings : playerState.battlefield;
-        if (targetSlot[laneIndex] !== null) {
-          addLog(isBuilding ? '该建筑槽已有建筑！' : '该路线已有卡牌！');
-          return;
-        }
-
-        window.SoundManager.playSound('place');
-
-        // 部署卡牌时保存基础属性
-        const deployedCard = {
-          ...card,
-          baseAtk: card.atk,
-          baseHp: card.hp
-        };
-
-        // 更新对应的槽位
-        const newSlots = isBuilding ? 
-          [...playerState.buildings] : 
-          [...playerState.battlefield];
-        newSlots[laneIndex] = deployedCard;
-
-        let newState = {
-          ...gameState,
-          [player]: {
-            ...playerState,
-            ...(isBuilding ? { buildings: newSlots } : { battlefield: newSlots }),
-            hand: playerState.hand.filter(c => c.instanceId !== card.instanceId),
-            coins: playerState.coins - card.cost
-          },
-          selectedCard: null,
-          log: [...gameState.log, `${player === 'red' ? '红方' : '蓝方'}在路线${laneIndex+1}放置了${isBuilding ? '建筑' : '战场牌'} ${card.name}`]
-        };
-
-        // ✨ 重新计算所有被动效果（因为场上卡牌数量改变）
-        newState = calculatePassiveEffects(newState);
-
-        // ✅ 骑士(42)特殊效果：登场时检查贵族数量
-        if (card.id === 42) {
-          let nobleCount = 0;
-          ['red', 'blue'].forEach(p => {
-            newState[p].battlefield.forEach(c => {
-              if (c && (c.stRace === '贵族' || c.ndRace === '贵族')) {
-                nobleCount++;
-              }
-            });
-          });
-          
-          if (nobleCount >= 2) {
-            deployedCard._shield = 1;
-            newState.log.push(`${card.name} 获得1回合护盾！`);
-            console.log('[骑士] 贵族>=2，获得护盾');
-          }
-        }
-
         setGameState(newState);
       };
 
-      // ── 处理战场卡槽点击（支持交换模式） ──
-      const handleBattlefieldClick = (clickedPlayer, clickedLane) => {
-        // 如果在交换模式中
-        if (swapMode) {
-          if (!swapMode.firstSlot) {
-            // 第一次点击：选择第一张卡
-            const card = gameState[clickedPlayer].battlefield[clickedLane];
-            
-            // 检查模式限制
-            if (swapMode.type === 'reposition') {
-              // 空间法术：只能选己方
-              const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-              if (clickedPlayer !== player) {
-                addLog('空间法术只能重排己方阵型！');
-                return;
-              }
-            }
-            
-            if (!card) {
-              addLog('该位置没有卡牌！');
-              return;
-            }
-            
-            setSwapMode({ ...swapMode, firstSlot: { player: clickedPlayer, lane: clickedLane, card } });
-            addLog(`选中 ${card.name}，请点击目标位置...`);
-          } else {
-            // 第二次点击：执行交换
-            const { firstSlot } = swapMode;
-            
-            // 检查是否点击同一位置
-            if (firstSlot.player === clickedPlayer && firstSlot.lane === clickedLane) {
-              addLog('请选择不同的位置！');
-              return;
-            }
-            
-            // 检查模式限制
-            if (swapMode.type === 'reposition' && firstSlot.player !== clickedPlayer) {
-              addLog('空间法术只能在己方内交换！');
-              return;
-            }
-            
-            // 执行交换
-            const newState = JSON.parse(JSON.stringify(gameState));
-            const card1 = newState[firstSlot.player].battlefield[firstSlot.lane];
-            const card2 = newState[clickedPlayer].battlefield[clickedLane];
-            
-            newState[firstSlot.player].battlefield[firstSlot.lane] = card2;
-            newState[clickedPlayer].battlefield[clickedLane] = card1;
-            
-            addLog(`交换 ${card1?.name || '空位'} 和 ${card2?.name || '空位'}`);
-            setGameState(newState);
-            
-            // 根据模式决定是否继续
-            if (swapMode.type === 'swapBattlefield') {
-              // 替名：只交换一次，立即结束
-              finishSwapMode();
-            } else {
-              // 空间法术：可以继续交换
-              setSwapMode({ ...swapMode, firstSlot: null });
-              addLog('继续选择或点击"完成重排"...');
-            }
-          }
-          return;
-        }
-        
-        // 非交换模式：正常部署/使用卡牌逻辑
-        const canDeploy = gameState.selectedCard?.type === 'battlefield' && 
-                         ((gameState.phase === 'redDeploy' && clickedPlayer === 'red') ||
-                          (gameState.phase === 'blueDeploy' && clickedPlayer === 'blue'));
-        
-        const canTarget = gameState.selectedCard && 
-                         window.EffectEngine.needsTarget(gameState.selectedCard.id);
-        
-        if (canDeploy) {
-          playCard(clickedLane);
-        } else if (canTarget) {
-          useCardOnTarget(clickedPlayer, clickedLane);
-        }
-      };
-
-// ── 完成交换模式 ──
-const finishSwapMode = () => {
-  if (!swapMode) return;
-  
-  // 检查是否是空间法师触发的
-  if (swapMode.spaceMage) {
-    // 空间法师触发：标记已使用，不消耗卡牌
-    const { player, lane } = swapMode.spaceMage;
-    
-    setGameState(prev => {
-      const newState = { ...prev };
-      const card = newState[player].battlefield[lane];
-      if (card && card.id === 28) {
-        card.usedAbilityThisPhase = true;
-        newState.log = [...newState.log, `${card.name} 已使用重置位置（本阶段）`];
-      }
-      return newState;
-    });
-  } else {
-    // 支援牌触发：消耗卡牌
-    const card = swapMode.card;
-    const player = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-    const cost = card.type === 'miracle' ? 0 : card.cost;
-    
-    setGameState(prev => ({
-      ...prev,
-      [player]: {
-        ...prev[player],
-        hand: prev[player].hand.filter(c => c.instanceId !== card.instanceId),
-        coins: prev[player].coins - cost
-      },
-      discardPile: [...prev.discardPile, card],
-      selectedCard: null,
-      log: [...prev.log, `${card.name} 使用完成`]
-    }));
-  }
-  
-  setSwapMode(null);
-  window.SoundManager.playSound('click');
-};
-
-// ── 取消交换模式 ──
-const cancelSwapMode = () => {
-  setSwapMode(null);
-  addLog('取消操作');
-};
-
-      // ── 使用支援/奇迹 对单位 ──
+      // ── 使用支援/奇迹（指定目标） ──
       const useCardOnTarget = (targetPlayer, laneIndex) => {
         const card = gameState.selectedCard;
         if (!card || (card.type !== 'support' && card.type !== 'miracle')) return;
-
-        const player      = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-        const playerState = gameState[player];
-        const target      = gameState[targetPlayer].battlefield[laneIndex];
-        if (!target) { addLog('目标位置没有单位！'); return; }
-
-        const cost = card.type === 'miracle' ? 0 : card.cost;
-        if (playerState.coins < cost) { addLog('金币不足！'); return; }
-
-        addLog(`${player === 'red' ? '红方' : '蓝方'}对 ${target.name} 使用了 ${card.name}`);
-        showCardOverlay(card);   // ← 展示支援/奇迹卡牌（内含音效）
-
-        // ✨ 触发卡牌效果
-        const effectContext = {
-          player: player,
-          card: card,
-          target: target,
-          logCallback: addLog
-        };
-
-        let newState = window.EffectEngine.trigger(card.id, effectContext, gameState);
-
-        // 扣除费用并移除手牌（注意：保留 newState 中效果系统已经修改的战场卡牌）
-        const newHand = newState[player].hand.filter(c => c.instanceId !== card.instanceId);
-        const newCoins = newState[player].coins - cost;
-        
-        // 只更新手牌和金币，保留战场的修改
-        newState[player].hand = newHand;
-        newState[player].coins = newCoins;
-        newState.discardPile = [...newState.discardPile, card];
-        newState.selectedCard = null;
-
-        console.log('[useCardOnTarget] 新状态战场:', newState[targetPlayer].battlefield.map(c => c ? {name: c.name, atk: c.atk, hp: c.hp} : null));
-
-          newState = checkAndRemoveDeadCards(newState);
-      
-        setGameState(newState);
-      };
-        
-
-      // ── 检查并移除死亡卡牌 ──
-      const checkAndRemoveDeadCards = (state) => {
-        ['red', 'blue'].forEach(player => {
-          state[player].battlefield = state[player].battlefield.map((card, idx) => {
-            if (card && card.hp <= 0) {
-              console.log(`[checkDead] ${player}路线${idx+1}: ${card.name} hp=${card.hp} 已死亡`);
-              state.discardPile.push(card);
-              state.log.push(`${card.name} 被击败（hp≤0）`);
-              return null;
-            }
-            return card;
-          });
-        });
-        
-        return state;
+        const player = GM.getPhasePlayer(gameState.phase);
+        const result = GM.useCardOnTarget(gameState, card, player, targetPlayer, laneIndex);
+        if (result.error) { addLog(result.error); return; }
+        showCardOverlay(card);
+        setGameState(result.state);
       };
 
-      // ── "确认使用"（支援/奇迹 对玩家本身或无目标效果） ──
+      // ── 使用支援/奇迹（无目标确认） ──
       const confirmUse = () => {
         const card = gameState.selectedCard;
         if (!card) return;
-
-        const player      = (gameState.phase === 'redDeploy' || gameState.phase === 'redSupport') ? 'red' : 'blue';
-        const playerState = gameState[player];
-        const cost        = card.type === 'miracle' ? 0 : card.cost;
-        if (playerState.coins < cost) { addLog('金币不足！'); return; }
-
-        // ✨ 检查是否是交换模式
-        const config = window.CardEffectConfigs?.[card.id];
-        if (config && config.requiresUIMode) {
-          // 开启交换模式
-          const mode = config.requiresUIMode;
-          setSwapMode({ type: mode, card, firstSlot: null });
-          addLog(`${card.name}: 请选择${
-            mode === 'reposition' ? '要移动的卡牌（己方）' :
-            mode === 'swapBattlefield' ? '第一张要交换的卡牌' :
-            '手牌'
-          }...`);
-          return;  // 不立即消耗卡牌
+        const player = GM.getPhasePlayer(gameState.phase);
+        // 检查是否需要进入换位模式（空间法术、替名等）
+        const swapCheck = GM.checkRequiresSwapMode(card, player);
+        if (swapCheck) {
+          setSwapMode(swapCheck.swapMode);
+          addLog(swapCheck.logMsg);
+          return; // 不立即消耗卡牌，等 finishSwapMode
         }
+        const result = GM.confirmUse(gameState, card, player);
+        if (result.error) { addLog(result.error); return; }
+        showCardOverlay(card);
+        setGameState(result.state);
+      };
 
-        addLog(`${player === 'red' ? '红方' : '蓝方'}使用了 ${card.name}`);
-        showCardOverlay(card);   // ← 展示支援/奇迹卡牌（内含音效）
-
-        // ✨ 触发卡牌效果（无目标或对玩家自己）
-        const effectContext = {
-          player: player,
-          card: card,
-          target: null,  // 无目标
-          logCallback: addLog
-        };
-
-        let newState = window.EffectEngine.trigger(card.id, effectContext, gameState);
-
-        // 扣除费用并移除手牌（保留效果系统的修改）
-        const newHand = newState[player].hand.filter(c => c.instanceId !== card.instanceId);
-        const newCoins = newState[player].coins - cost;
-        
-        newState[player].hand = newHand;
-        newState[player].coins = newCoins;
-        newState.discardPile = [...newState.discardPile, card];
-        newState.selectedCard = null;
-
-        console.log('[confirmUse] 新状态:', newState);
-
-        // ✅ 处理特殊标记
-        // 1. 处决：立即胜利
-        if (newState._immediateVictory) {
-          const victor = newState._immediateVictory;
-          setWinner(victor);
-          delete newState._immediateVictory;
-          setGameState(newState);
-          return;
-        }
-
-        // ✅ 检查并移除死亡卡牌（用于地狱之主等修改血量的效果）
-        ['red', 'blue'].forEach(player => {
-          newState[player].battlefield = newState[player].battlefield.map((card, idx) => {
-            if (card && card.hp <= 0) {
-              console.log(`[confirmUse死亡检查] ${player}路线${idx+1}: ${card.name} hp=${card.hp} 已死亡`);
-              newState.discardPile.push(card);
-              newState.log.push(`${card.name} 被击败（hp≤0）`);
-              return null;
-            }
-            return card;
-          });
-        });
-
-        // 2. 末日：立即进入下一回合（最后处理）
-        const shouldSkipTurn = newState._skipToNextTurn;
-        if (shouldSkipTurn) {
-          delete newState._skipToNextTurn;
-        }
-
-        setGameState(newState);
-        
-        // 延迟触发下一回合
-        if (shouldSkipTurn) {
-          setTimeout(() => {
-            setGameState(prevState => {
-              // 基于当前状态（已清空战场）创建新回合
-              const newTurn = prevState.turn + 1;
-              const coins = Math.min(newTurn, 10);
-              const logs = [`--- 第${newTurn}回合开始 ---`, `双方获得 ${coins} 金币`];
-              
-              let deck = [...prevState.deck];
-              let redHand = [...prevState.red.hand];
-              let blueHand = [...prevState.blue.hand];
-              
-              if (newTurn >= 2) {
-                for (let i = 0; i < 2; i++) {
-                  const r = deck.pop(); if (r) redHand.push(r);
-                  const b = deck.pop(); if (b) blueHand.push(b);
-                }
-                logs.push('双方各抽2张牌');
-              } else {
-                logs.push('第一回合不抽牌');
-              }
-              
-              return {
-                ...prevState,
-                turn: newTurn,
-                phase: 'redDeploy',
-                deck,
-                red: { ...prevState.red, coins, hand: redHand },
-                blue: { ...prevState.blue, coins, hand: blueHand },
-                log: [...prevState.log, ...logs]
-              };
-            });
-          }, 500);
-        }
-};
-    
-
-   
-
-
-// ── 空间法师激活 ──
-const activateSpaceMage = (player, lane) => {
-  const card = gameState[player].battlefield[lane];
-  
-  if (!card || card.id !== 28) {
-    addLog('错误：不是空间法师！');
-    return;
-  }
-  
-  if (card.usedAbilityThisPhase) {
-    addLog('空间法师本阶段已使用过重置位置！');
-    return;
-  }
-  
-  setSwapMode({ 
-    type: 'reposition', 
-    spaceMage: { player, lane },
-    firstSlot: null 
-  });
-  
-  addLog(`${card.name}: 进入重排模式...`);
-  window.SoundManager.playSound('click');
-};
-
-      // ── 结束阶段 ──
+      // ── 阶段结束 ──
       const endPhase = () => {
-
-         // ✨ 清除所有空间法师的使用标记
-  setGameState(prev => {
-    const newState = { ...prev };
-    ['red', 'blue'].forEach(player => {
-      newState[player].battlefield.forEach(card => {
-        if (card && card.id === 28) {
-          card.usedAbilityThisPhase = false;
-        }
-      });
-    });
-    return newState;
-  });
-        const next = { redDeploy: 'blueDeploy', blueDeploy: 'redSupport', redSupport: 'battle' };
-        const target = next[gameState.phase];
-
+        // 清除空间法师本阶段标记
+        const cleaned = GM.clearSpaceMageFlags(gameState);
+        const target = GM.getNextPhase(cleaned.phase);
         if (target === 'battle') {
-          setGameState(prev => ({ ...prev, phase: 'battle', selectedCard: null, log: [...prev.log, '--- 战斗阶段 ---'] }));
+          setGameState(prev => { const s = GM.clearSpaceMageFlags(prev); return { ...s, phase: 'battle', selectedCard: null, log: [...s.log, '--- 战斗阶段 ---'] }; });
           setTimeout(resolveBattle, 500);
         } else {
-          const names = { blueDeploy: '蓝方部署阶段', redSupport: '红方支援阶段' };
-          setGameState(prev => ({ ...prev, phase: target, selectedCard: null, log: [...prev.log, `--- ${names[target]} ---`] }));
+          setGameState(prev => { const s = GM.clearSpaceMageFlags(prev); return { ...s, phase: target, selectedCard: null, log: [...s.log, `--- ${GM.PHASE_NAMES[target]} ---`] }; });
         }
       };
 
-      // ── 战斗结算（逐路线动画） ──
+      // ── 战斗结算（委托给 GameManager） ──
       const resolveBattle = async () => {
-        // 拷贝当前状态用于逐步修改
-        let redBF       = gameState.red.battlefield.map(c => c ? {...c} : null);
-        let blueBF      = gameState.blue.battlefield.map(c => c ? {...c} : null);
-        let redBuilding = gameState.red.buildings.map(c => c ? {...c} : null);
-        let blueBuilding= gameState.blue.buildings.map(c => c ? {...c} : null);
-        let redHP       = gameState.red.health;
-        let blueHP      = gameState.blue.health;
-        let discard     = [...gameState.discardPile];
-        let logs        = [];
-
-        for (let i = 0; i < 4; i++) {
-  setBattleAnimation({ active: true, lane: i });
-  window.SoundManager.playSound('attack');
-  await new Promise(r => setTimeout(r, 1000));
-
-  const rc = redBF[i], bc = blueBF[i];
-  const rb = redBuilding[i], bb = blueBuilding[i];  // 建筑
-
-  if (rc && bc) {
-    // ✅ 检查冻结状态
-    const rcFrozen = rc._frozen && rc._frozen > 0;
-    const bcFrozen = bc._frozen && bc._frozen > 0;
-    
-    if (rcFrozen && bcFrozen) {
-      logs.push(`路线${i+1}: ${rc.name} 和 ${bc.name} 都被冻结，无法行动`);
-      continue;
-    } else if (rcFrozen) {
-      logs.push(`路线${i+1}: ${rc.name} 被冻结，无法攻击`);
-      // 只有蓝方攻击
-      let damage = bc.atk;
-      
-      // 建筑抵挡
-      if (damage > 0 && rb) {
-        const absorbed = Math.min(damage, rb.hp);
-        rb.hp -= absorbed;
-        damage -= absorbed;
-        logs.push(`  🏰 ${rb.name} 抵挡了 ${absorbed} 点伤害`);
-        if (rb.hp <= 0) {
-          discard.push(rb);
-          redBuilding[i] = null;
-          logs.push(`  🏰 ${rb.name} 被摧毁`);
-        }
-      }
-      
-      rc.hp -= damage;
-      logs.push(`  ${bc.name} 攻击 ${rc.name} (剩余${rc.hp}HP)`);
-      
-      if (rc.hp <= 0) {
-        // 屠龙勇士检测
-        if (rc.id === 50 && !rc._usedAntiOneShot) {
-          rc.hp = 1;
-          rc._usedAntiOneShot = true;
-          logs.push(`  ⚡ ${rc.name} 不屈之志触发！强制维持1点生命`);
-        } else {
-          discard.push(rc);
-          redBF[i] = null;
-          logs.push(`  红方 ${rc.name} 被击败`);
-        }
-      }
-      continue;
-    } else if (bcFrozen) {
-      logs.push(`路线${i+1}: ${bc.name} 被冻结，无法攻击`);
-      // 只有红方攻击
-      let damage = rc.atk;
-      
-      // 建筑抵挡
-      if (damage > 0 && bb) {
-        const absorbed = Math.min(damage, bb.hp);
-        bb.hp -= absorbed;
-        damage -= absorbed;
-        logs.push(`  🏰 ${bb.name} 抵挡了 ${absorbed} 点伤害`);
-        if (bb.hp <= 0) {
-          discard.push(bb);
-          blueBuilding[i] = null;
-          logs.push(`  🏰 ${bb.name} 被摧毁`);
-        }
-      }
-      
-      bc.hp -= damage;
-      logs.push(`  ${rc.name} 攻击 ${bc.name} (剩余${bc.hp}HP)`);
-      
-      if (bc.hp <= 0) {
-        // 屠龙勇士检测
-        if (bc.id === 50 && !bc._usedAntiOneShot) {
-          bc.hp = 1;
-          bc._usedAntiOneShot = true;
-          logs.push(`  ⚡ ${bc.name} 不屈之志触发！强制维持1点生命`);
-        } else {
-          discard.push(bc);
-          blueBF[i] = null;
-          logs.push(`  蓝方 ${bc.name} 被击败`);
-        }
-      }
-      continue;
-    }
-    
-    // 记录战斗前生命值
-    const rcHpBefore = rc.hp;
-    const bcHpBefore = bc.hp;
-    
-    // ✨ 计算战斗时的种族加成
-    let rcAtk = rc.atk;
-    let bcAtk = bc.atk;
-
-    // 红方对蓝方的加成
-    if (rc._vsRaceBonus) {
-      const { races, bonus } = rc._vsRaceBonus;
-      if (races.some(r => bc.stRace === r || bc.ndRace === r)) {
-        if (bonus.atkMultiplier) {
-          rcAtk *= bonus.atkMultiplier;
-          logs.push(`  ⚔️ ${rc.name} 对 ${bc.name} 攻击力×${bonus.atkMultiplier}！`);
-        }
-        if (bonus.atk) {
-          rcAtk += bonus.atk;
-          logs.push(`  ⚔️ ${rc.name} 对 ${bc.name} 攻击力+${bonus.atk}！`);
-        }
-      }
-    }
-    
-    // 红方的多重种族加成
-    if (rc._vsRaceBonuses) {
-      rc._vsRaceBonuses.forEach(({ races, bonus }) => {
-        if (races.some(r => bc.stRace === r || bc.ndRace === r)) {
-          if (bonus.atkMultiplier) {
-            rcAtk *= bonus.atkMultiplier;
+        await GM.resolveBattle(gameState, {
+          setBattleAnimation,
+          onLaneResolve: (laneIndex, result) => {
+            // 每条战线计算完成后立即更新卡牌在UI中的显示
+            setGameState(prev => {
+              const newState = JSON.parse(JSON.stringify(prev));
+              newState.red.battlefield[laneIndex] = result.red;
+              newState.blue.battlefield[laneIndex] = result.blue;
+              if (result.redBuilding) newState.red.buildings[laneIndex] = result.redBuilding;
+              if (result.blueBuilding) newState.blue.buildings[laneIndex] = result.blueBuilding;
+              // 🔴 实时更新玩家血量
+              newState.red.health = result.redHP;
+              newState.blue.health = result.blueHP;
+              return newState;
+            });
+          },
+          onFinish: ({ state: finalState, winner: w }) => {
+            setGameState(finalState);
+            if (w) setWinner(w);
+            setTimeout(() => {
+              setGameState(prev => {
+                const result = GM.checkDeckEmpty(prev, w);
+                if (result) { setWinner(result.winner); return result.state; }
+                return prev;
+              });
+            }, 100);
           }
-          if (bonus.atk) {
-            rcAtk += bonus.atk;
+        });
+      };
+
+      // ── 换位模式（委托给 GameManager） ──
+
+      // 战场格子点击：换位模式下处理选择/交换，非换位模式下正常部署/使用
+      const handleBattlefieldClick = (clickedPlayer, clickedLane) => {
+        if (swapMode) {
+          const currentPhasePlayer = GM.getPhasePlayer(gameState.phase);
+          const result = GM.handleSwapClick(gameState, swapMode, clickedPlayer, clickedLane, currentPhasePlayer);
+          if (result.error) { addLog(result.error); return; }
+          if (result.logMsg)      addLog(result.logMsg);
+          if (result.continueMsg) addLog(result.continueMsg);
+          if (result.state) setGameState(result.state);
+          if (result.done) {
+            // swapBattlefield 完成后立即走 finishSwapMode
+            const finalState = GM.finishSwapMode(result.state, swapMode);
+            setGameState(finalState);
+            setSwapMode(null);
+            window.SoundManager.playSound('click');
+          } else if (result.swapMode !== undefined) {
+            setSwapMode(result.swapMode);
           }
+          return;
         }
-      });
-    }
+        // 非换位模式：正常部署/使用卡牌
+        const canDeploy = gameState.selectedCard?.type === 'battlefield' &&
+          ((gameState.phase === 'redDeploy' && clickedPlayer === 'red') ||
+           (gameState.phase === 'blueDeploy' && clickedPlayer === 'blue'));
+        const canTarget = gameState.selectedCard && window.EffectEngine?.needsTarget(gameState.selectedCard.id);
+        if (canDeploy)      playCard(clickedLane);
+        else if (canTarget) useCardOnTarget(clickedPlayer, clickedLane);
+      };
 
-    // 蓝方对红方的加成
-    if (bc._vsRaceBonus) {
-      const { races, bonus } = bc._vsRaceBonus;
-      if (races.some(r => rc.stRace === r || rc.ndRace === r)) {
-        if (bonus.atkMultiplier) {
-          bcAtk *= bonus.atkMultiplier;
-          logs.push(`  ⚔️ ${bc.name} 对 ${rc.name} 攻击力×${bonus.atkMultiplier}！`);
-        }
-        if (bonus.atk) {
-          bcAtk += bonus.atk;
-          logs.push(`  ⚔️ ${bc.name} 对 ${rc.name} 攻击力+${bonus.atk}！`);
-        }
-      }
-    }
+      // 空间法师激活（点击战场上已部署的空间法师时调用）
+      const activateSpaceMage = (player, lane) => {
+        const result = GM.activateSpaceMage(gameState, player, lane);
+        if (result.error) { addLog(result.error); return; }
+        setSwapMode(result.swapMode);
+        addLog(result.logMsg);
+        window.SoundManager.playSound('click');
+      };
 
-    // 蓝方的多重种族加成
-    if (bc._vsRaceBonuses) {
-      bc._vsRaceBonuses.forEach(({ races, bonus }) => {
-        if (races.some(r => rc.stRace === r || rc.ndRace === r)) {
-          if (bonus.atkMultiplier) {
-            bcAtk *= bonus.atkMultiplier;
-          }
-          if (bonus.atk) {
-            bcAtk += bonus.atk;
-          }
-        }
-      });
-    }
-
-    // ✅ 刺客(45)首次攻击加成
-    if (rc.id === 45 && !rc._hasAttacked) {
-      rcAtk *= 2;
-      rc._hasAttacked = true;
-      logs.push(`  🗡️ ${rc.name} 首次攻击！攻击力×2`);
-    }
-    
-    if (bc.id === 45 && !bc._hasAttacked) {
-      bcAtk *= 2;
-      bc._hasAttacked = true;
-      logs.push(`  🗡️ ${bc.name} 首次攻击！攻击力×2`);
-    }
-    
-    // 互相攻击（使用计算后的攻击力）
-    // ✅ 护盾检测
-    let rcDamage = bcAtk;
-    let bcDamage = rcAtk;
-    
-    if (rc._shield && rc._shield > 0) {
-      rcDamage = 0;
-      rc._shield--;
-      logs.push(`  🛡️ ${rc.name} 的护盾抵挡了攻击！`);
-    }
-    
-    if (bc._shield && bc._shield > 0) {
-      bcDamage = 0;
-      bc._shield--;
-      logs.push(`  🛡️ ${bc.name} 的护盾抵挡了攻击！`);
-    }
-    
-    // ✅ 建筑抵挡伤害
-    // 红方建筑为红方战场牌抵挡
-    if (rcDamage > 0 && rb) {
-      const absorbed = Math.min(rcDamage, rb.hp);
-      rb.hp -= absorbed;
-      rcDamage -= absorbed;
-      logs.push(`  🏰 ${rb.name} 为 ${rc.name} 抵挡了 ${absorbed} 点伤害！`);
-      
-      if (rb.hp <= 0) {
-        discard.push(rb);
-        redBuilding[i] = null;
-        logs.push(`  🏰 ${rb.name} 被摧毁`);
-      }
-    }
-    
-    // 蓝方建筑为蓝方战场牌抵挡
-    if (bcDamage > 0 && bb) {
-      const absorbed = Math.min(bcDamage, bb.hp);
-      bb.hp -= absorbed;
-      bcDamage -= absorbed;
-      logs.push(`  🏰 ${bb.name} 为 ${bc.name} 抵挡了 ${absorbed} 点伤害！`);
-      
-      if (bb.hp <= 0) {
-        discard.push(bb);
-        blueBuilding[i] = null;
-        logs.push(`  🏰 ${bb.name} 被摧毁`);
-      }
-    }
-    
-    // 应用剩余伤害到战场牌
-    rc.hp -= rcDamage;
-    bc.hp -= bcDamage;
-    
-    // ✅ 屠龙勇士(50)免秒杀检测
-    if (rc.id === 50 && rc.hp <= 0 && !rc._usedAntiOneShot) {
-      rc.hp = 1;
-      rc._usedAntiOneShot = true;
-      logs.push(`  ⚡ ${rc.name} 不屈之志触发！强制维持1点生命`);
-    }
-    
-    if (bc.id === 50 && bc.hp <= 0 && !bc._usedAntiOneShot) {
-      bc.hp = 1;
-      bc._usedAntiOneShot = true;
-      logs.push(`  ⚡ ${bc.name} 不屈之志触发！强制维持1点生命`);
-    }
-    
-    logs.push(`路线${i+1}: ${rc.name}(${rc.hp}HP) VS ${bc.name}(${bc.hp}HP)`);
-    
-    // ✅ 女伯爵(61)攻击后回血
-    if (rc.id === 61 && rcDamage > 0 && rc.hp > 0) {
-      rc.hp += 1;
-      rc.maxHp = Math.max(rc.maxHp, rc.hp);
-      logs.push(`  💉 ${rc.name} 吸血！hp+1 (${rc.hp}HP)`);
-    }
-    
-    if (bc.id === 61 && bcDamage > 0 && bc.hp > 0) {
-      bc.hp += 1;
-      bc.maxHp = Math.max(bc.maxHp, bc.hp);
-      logs.push(`  💉 ${bc.name} 吸血！hp+1 (${bc.hp}HP)`);
-    }
-    
-    // 检查是否死亡
-    const rcDied = rc.hp <= 0;
-    const bcDied = bc.hp <= 0;
-    
-    // 记录是否被攻击
-    const rcWasAttacked = rc.hp < rcHpBefore;
-    const bcWasAttacked = bc.hp < bcHpBefore;
-    
-    // 处理红方
-    if (rcDied) {
-      discard.push(rc);
-      redBF[i] = null;
-      logs.push(`  红方 ${rc.name} 被击败`);
-    } else if (rc.id === 16 && rcWasAttacked) {
-      // 🐺 红方狼人被攻击后存活：再次行动
-      logs.push(`  ⚡ ${rc.name} 触发狼性：再次行动！`);
-      
-      if (bc && !bcDied) {
-        // 对面还活着，攻击对面
-        bc.hp -= rc.atk;
-        logs.push(`  ${rc.name} 再次攻击 ${bc.name} (剩余${bc.hp}HP)`);
-        
-        if (bc.hp <= 0) {
-          discard.push(bc);
-          blueBF[i] = null;
-          logs.push(`  蓝方 ${bc.name} 被击败`);
-        }
-      } else {
-        // 对面已死，攻击玩家
-        blueHP -= rc.atk;
-        logs.push(`  ${rc.name} 对蓝方玩家造成${rc.atk}点伤害`);
-      }
-    }
-    
-    // 处理蓝方
-    if (bcDied && !rcDied) {
-      discard.push(bc);
-      blueBF[i] = null;
-      logs.push(`  蓝方 ${bc.name} 被击败`);
-    } else if (bc && bc.id === 16 && bcWasAttacked && !bcDied) {
-      // 🐺 蓝方狼人被攻击后存活：再次行动
-      logs.push(`  ⚡ ${bc.name} 触发狼性：再次行动！`);
-      
-      if (rc && !rcDied) {
-        // 对面还活着，攻击对面
-        rc.hp -= bc.atk;
-        logs.push(`  ${bc.name} 再次攻击 ${rc.name} (剩余${rc.hp}HP)`);
-        
-        if (rc.hp <= 0) {
-          discard.push(rc);
-          redBF[i] = null;
-          logs.push(`  红方 ${rc.name} 被击败`);
-        }
-      } else {
-        // 对面已死，攻击玩家
-        redHP -= bc.atk;
-        logs.push(`  ${bc.name} 对红方玩家造成${bc.atk}点伤害`);
-      }
-    }
-    
-  } else if (rc) {
-    // 红方单方面攻击
-    blueHP -= rc.atk;
-    logs.push(`路线${i+1}: ${rc.name} 攻击蓝方玩家，造成 ${rc.atk} 伤害`);
-    
-    // 🐺 狼人额外攻击（没有被攻击也触发）
-    if (rc.id === 16) {
-      logs.push(`  ⚡ ${rc.name} 狼性爆发：再次攻击！`);
-      blueHP -= rc.atk;
-      logs.push(`  ${rc.name} 再次造成${rc.atk}点伤害`);
-    }
-    
-  } else if (bc) {
-    // 蓝方单方面攻击
-    redHP -= bc.atk;
-    logs.push(`路线${i+1}: ${bc.name} 攻击红方玩家，造成 ${bc.atk} 伤害`);
-    
-    // 🐺 狼人额外攻击（没有被攻击也触发）
-    if (bc.id === 16) {
-      logs.push(`  ⚡ ${bc.name} 狼性爆发：再次攻击！`);
-      redHP -= bc.atk;
-      logs.push(`  ${bc.name} 再次造成${bc.atk}点伤害`);
-    }
-  }
-}
-
-        setBattleAnimation({ active: false, lane: -1 });
-
-        // 奇迹牌里程碑抽取
-        let newMDeck = [...gameState.miracleDeck];
-        let redHand  = [...gameState.red.hand];
-        let blueHand = [...gameState.blue.hand];
-        let redDrawn = [...gameState.red.miracleDrawn];
-        let blueDrawn= [...gameState.blue.miracleDrawn];
-
-        const milestones = [25, 20, 15, 10, 5];
-        const drawMiracle = (hp, drawn, hand) => {
-          const hit = milestones.some(m => hp <= m && !drawn.includes(m));
-          if (hit) {
-            const newDrawn = [...drawn, ...milestones.filter(m => hp <= m && !drawn.includes(m))];
-            const card = newMDeck.pop();
-            if (card) {
-              hand.push(card);
-              return { drawn: newDrawn, drewName: card.name };
-            }
-            return { drawn: newDrawn, drewName: null };
-          }
-          return { drawn, drewName: null };
-        };
-
-        if (redHP < gameState.red.health) {
-          const res = drawMiracle(redHP, redDrawn, redHand);
-          redDrawn = res.drawn;
-          if (res.drewName) logs.push(`红方血量降至 ${redHP}，抽取奇迹牌：${res.drewName}`);
-        }
-        if (blueHP < gameState.blue.health) {
-          const res = drawMiracle(blueHP, blueDrawn, blueHand);
-          blueDrawn = res.drawn;
-          if (res.drewName) logs.push(`蓝方血量降至 ${blueHP}，抽取奇迹牌：${res.drewName}`);
-        }
-
-        // 判胜
-        if (redHP <= 0 || blueHP <= 0) {
-          const w = redHP > blueHP ? '红方' : (blueHP > redHP ? '蓝方' : '平局');
-          logs.push(`🎉 ${w === '平局' ? '平局！双方血量相同' : w + '获胜！对手生命归零'}`);
-          window.SoundManager.playSound('victory');
-          setWinner(w);
-        } else {
-          logs.push('战斗结算完成');
-        }
-
-        // 更新状态
-        let finalState = {
-          ...gameState,
-          phase: 'idle',
-          red:  { ...gameState.red,  battlefield: redBF,  buildings: redBuilding,  health: redHP,  hand: redHand,  miracleDrawn: redDrawn },
-          blue: { ...gameState.blue, battlefield: blueBF, buildings: blueBuilding, health: blueHP, hand: blueHand, miracleDrawn: blueDrawn },
-          miracleDeck: newMDeck,
-          discardPile: discard,
-          log: [...gameState.log, ...logs]
-        };
-
-        // ✨ 计算所有被动效果
-        finalState = calculatePassiveEffects(finalState);
-
+      // 完成换位
+      const finishSwapMode = () => {
+        if (!swapMode) return;
+        const finalState = GM.finishSwapMode(gameState, swapMode);
         setGameState(finalState);
+        setSwapMode(null);
+        window.SoundManager.playSound('click');
+      };
 
-        // 牌库耗尽检查（延迟一帧确保 state 更新后再判）
-        setTimeout(() => {
-          setGameState(prev => {
-            if (prev.deck.length === 0 && prev.red.hand.length === 0 && prev.blue.hand.length === 0 && !winner) {
-              const w = prev.red.health > prev.blue.health ? '红方' : (prev.blue.health > prev.red.health ? '蓝方' : '平局');
-              setWinner(w);
-              window.SoundManager.playSound('victory');
-              return { ...prev, log: [...prev.log, '--- 牌库耗尽 ---', `红方:${prev.red.health} | 蓝方:${prev.blue.health}`, `${w === '平局' ? '平局' : w + '获胜'}`] };
-            }
-            return prev;
-          });
-        }, 100);
+      // 取消换位
+      const cancelSwapMode = () => {
+        setSwapMode(null);
+        addLog('取消操作');
       };
 
       // ── 重置 ──
@@ -1496,7 +372,6 @@ const activateSpaceMage = (player, lane) => {
         initGame();
       };
 
-      // ── 渲染 ──
       if (!uiReady) return <div className="text-white text-center mt-40 text-xl">加载中…</div>;
 
       return (
@@ -1522,6 +397,7 @@ const activateSpaceMage = (player, lane) => {
           onCancelSwap={cancelSwapMode}
           onActivateSpaceMage={activateSpaceMage}
           hideOpponentHand={false}
+          gameMode="ai"
           myRole={null}
         />
       );
@@ -1529,7 +405,5 @@ const activateSpaceMage = (player, lane) => {
 
     ReactDOM.render(<LocalGame />, document.getElementById('root'));
     </script>
-
-   
 </body>
 </html>
